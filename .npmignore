@@ -1,0 +1,17 @@
+src/
+tests/
+.git/
+.github/
+.claude/
+node_modules/
+coverage/
+*.tsbuildinfo
+.vite/
+.DS_Store
+tsconfig.json
+tsconfig.test.json
+vitest.config.ts
+vite.config.ts
+eslint.config.js
+.prettierrc
+PORTING_PLAN.md

@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+title: "UQA-JS: Unified Query Algebra for the Browser"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - given-names: Jaepil
+    family-names: Jeong
+    email: jaepil@cognica.io
+    affiliation: "Cognica, Inc."
+repository-code: "https://github.com/cognica-io/uqa-js"
+license: AGPL-3.0-only
+version: 0.1.0
+date-released: "2026-03-28"
+abstract: >-
+  TypeScript port of UQA (Unified Query Algebra), a multi-paradigm database
+  engine that unifies relational, text retrieval, vector search, graph query,
+  and geospatial paradigms under a single algebraic structure, using posting
+  lists as the universal abstraction. Runs in the browser via WASM.
+keywords:
+  - unified-query-algebra
+  - information-retrieval
+  - vector-search
+  - graph-database
+  - bm25
+  - bayesian-bm25
+  - posting-list
+  - multi-paradigm-database
+  - postgresql-compatible
+  - sql-engine
+  - opencypher
+  - typescript
+  - browser
+  - wasm
+  - text-analysis
+  - full-text-search
+  - query-optimization
+  - join-ordering
+  - calibration-metrics
+  - attention-fusion
+  - multi-stage-retrieval
+  - temporal-graph
+  - graph-neural-network
+  - message-passing
+  - pagerank
+  - deep-fusion
+  - convolutional-neural-network
+  - vector-calibration
+  - likelihood-ratio
