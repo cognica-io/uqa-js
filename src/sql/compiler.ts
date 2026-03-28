@@ -94,8 +94,13 @@ import {
   NotILike,
   IsNull,
   IsNotNull,
+  createVertex,
+  createEdge,
 } from "../core/types.js";
 import type { PostingEntry as PostingEntryType, Predicate } from "../core/types.js";
+import { listAnalyzers as listAnalyzersFn } from "../analysis/analyzer.js";
+import { CypherCompiler } from "../graph/cypher/compiler.js";
+import type { GraphStore } from "../storage/abc/graph-store.js";
 import type { IndexStats } from "../core/types.js";
 import { Operator } from "../operators/base.js";
 import type { ExecutionContext } from "../operators/base.js";
@@ -3351,7 +3356,116 @@ export class SQLCompiler {
       );
     }
 
+    if (funcName === "create_graph") return this._buildCreateGraph(funcArgs, evaluator);
+    if (funcName === "drop_graph") return this._buildDropGraph(funcArgs, evaluator);
+    if (funcName === "create_analyzer") return this._buildCreateAnalyzer(funcArgs, evaluator);
+    if (funcName === "drop_analyzer") return this._buildDropAnalyzer(funcArgs, evaluator);
+    if (funcName === "list_analyzers") return this._buildListAnalyzers();
+    if (funcName === "set_table_analyzer") return this._buildSetTableAnalyzer(funcArgs, evaluator);
+    if (funcName === "graph_add_vertex") return this._buildGraphAddVertex(funcArgs, evaluator);
+    if (funcName === "graph_add_edge") return this._buildGraphAddEdge(funcArgs, evaluator);
+    if (funcName === "build_grid_graph") return this._buildGridGraph(funcArgs, evaluator);
+    if (funcName === "cypher") return this._buildCypherFrom(funcArgs, evaluator);
+
     throw new Error(`Unsupported FROM-clause function: ${funcName}`);
+  }
+
+  // -- Graph/Analyzer/Cypher FROM functions -------------------------------
+
+  private _buildCreateGraph(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (!a.length) throw new Error("create_graph() requires a graph name");
+    const n = String(ev.evaluate(a[0]!, {}));
+    (this._engine as { createGraph(n: string): void }).createGraph(n);
+    return [{ create_graph: `graph '${n}' created` }];
+  }
+  private _buildDropGraph(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (!a.length) throw new Error("drop_graph() requires a graph name");
+    const n = String(ev.evaluate(a[0]!, {}) as string | number);
+    (this._engine as { dropGraph(n: string): void }).dropGraph(n);
+    return [{ drop_graph: `graph '${n}' dropped` }];
+  }
+  private _buildCreateAnalyzer(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (a.length < 2) throw new Error("create_analyzer() requires (name, config_json)");
+    const n = String(ev.evaluate(a[0]!, {}) as string | number);
+    const c = JSON.parse(String(ev.evaluate(a[1]!, {}) as string | number)) as Record<string, unknown>;
+    (this._engine as { createAnalyzer(n: string, c: Record<string, unknown>): void }).createAnalyzer(n, c);
+    return [{ create_analyzer: `analyzer '${n}' created` }];
+  }
+  private _buildDropAnalyzer(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (!a.length) throw new Error("drop_analyzer() requires a name");
+    const n = String(ev.evaluate(a[0]!, {}) as string | number);
+    (this._engine as { dropAnalyzer(n: string): void }).dropAnalyzer(n);
+    return [{ drop_analyzer: `analyzer '${n}' dropped` }];
+  }
+  private _buildListAnalyzers(): Record<string, unknown>[] {
+    return listAnalyzersFn().map((n) => ({ analyzer_name: n }));
+  }
+  private _buildSetTableAnalyzer(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (a.length < 3) throw new Error("set_table_analyzer(table, field, analyzer[, phase])");
+    const t = String(ev.evaluate(a[0]!, {}) as string | number);
+    const f = String(ev.evaluate(a[1]!, {}) as string | number);
+    const an = String(ev.evaluate(a[2]!, {}) as string | number);
+    const ph = a.length > 3 ? String(ev.evaluate(a[3]!, {}) as string | number) : "both";
+    (this._engine as { setTableAnalyzer(t: string, f: string, a: string, o: { phase: string }): void }).setTableAnalyzer(t, f, an, { phase: ph });
+    return [{ set_table_analyzer: `analyzer '${an}' assigned to ${t}.${f}` }];
+  }
+  private _buildGraphAddVertex(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (a.length < 3) throw new Error("graph_add_vertex(id, label, table[, props])");
+    const vid = Number(ev.evaluate(a[0]!, {}));
+    const lbl = String(ev.evaluate(a[1]!, {}) as string | number);
+    const tbl = String(ev.evaluate(a[2]!, {}) as string | number);
+    const props: Record<string, unknown> = {};
+    if (a.length > 3) {
+      for (const pair of String(ev.evaluate(a[3]!, {}) as string | number).split(",")) {
+        const [k, v] = pair.trim().split("=", 2);
+        if (k && v) props[k.trim()] = isNaN(Number(v.trim())) ? v.trim() : Number(v.trim());
+      }
+    }
+    (this._engine as { addGraphVertex(v: unknown, o: { table: string }): void }).addGraphVertex(createVertex(vid, lbl, props), { table: tbl });
+    return [{ result: `vertex ${String(vid)} added to ${tbl}` }];
+  }
+  private _buildGraphAddEdge(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (a.length < 5) throw new Error("graph_add_edge(eid, src, tgt, label, table[, props])");
+    const eid = Number(ev.evaluate(a[0]!, {}));
+    const src = Number(ev.evaluate(a[1]!, {}));
+    const tgt = Number(ev.evaluate(a[2]!, {}));
+    const lbl = String(ev.evaluate(a[3]!, {}) as string | number);
+    const tbl = String(ev.evaluate(a[4]!, {}) as string | number);
+    const props: Record<string, unknown> = {};
+    if (a.length > 5) {
+      for (const pair of String(ev.evaluate(a[5]!, {}) as string | number).split(",")) {
+        const [k, v] = pair.trim().split("=", 2);
+        if (k && v) props[k.trim()] = isNaN(Number(v.trim())) ? v.trim() : Number(v.trim());
+      }
+    }
+    (this._engine as { addGraphEdge(e: unknown, o: { table: string }): void }).addGraphEdge(createEdge(eid, src, tgt, lbl, props), { table: tbl });
+    return [{ result: `edge ${String(eid)} added to ${tbl}` }];
+  }
+  private _buildGridGraph(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (a.length < 4) throw new Error("build_grid_graph(table, rows, cols, label)");
+    const tbl = String(ev.evaluate(a[0]!, {}) as string | number);
+    const rows = Number(ev.evaluate(a[1]!, {}));
+    const cols = Number(ev.evaluate(a[2]!, {}));
+    const lbl = String(ev.evaluate(a[3]!, {}) as string | number);
+    let eid = 1;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const pid = r * cols + c + 1;
+        if (c < cols - 1) { (this._engine as { addGraphEdge(e: unknown, o: { table: string }): void }).addGraphEdge(createEdge(eid++, pid, pid + 1, lbl), { table: tbl }); }
+        if (r < rows - 1) { (this._engine as { addGraphEdge(e: unknown, o: { table: string }): void }).addGraphEdge(createEdge(eid++, pid, pid + cols, lbl), { table: tbl }); }
+      }
+    }
+    return [{ table_name: tbl, rows, cols, edges: eid - 1 }];
+  }
+  private _buildCypherFrom(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {
+    if (a.length < 2) throw new Error("cypher() requires (graph_name, query)");
+    const gn = String(ev.evaluate(a[0]!, {}) as string | number);
+    const qs = String(ev.evaluate(a[1]!, {}) as string | number);
+    const graph = (this._engine as { getGraph(n: string): GraphStore }).getGraph(gn);
+    const params: Record<string, unknown> = {};
+    for (let i = 0; i < this._params.length; i++) params[String(i + 1)] = this._params[i];
+    const compiler = new CypherCompiler(graph, gn, params);
+    return compiler.executeRows(qs, params);
   }
 
   private _buildGenerateSeries(
