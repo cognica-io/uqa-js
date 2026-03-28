@@ -1,5 +1,5 @@
 {
-  "name": "uqa",
+  "name": "@jaepil/uqa",
   "version": "0.1.0",
   "type": "module",
   "description": "Unified Query Algebra -- multi-paradigm database engine for the browser",
@@ -43,7 +43,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc --noEmit && vite build && tsc --emitDeclarationOnly --declaration --declarationDir dist/types --outDir dist/types",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json --emitDeclarationOnly --declaration --declarationDir dist/types --outDir dist/types",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
