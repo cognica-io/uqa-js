@@ -1,5 +1,21 @@
 # History
 
+## 0.1.1 (2026-03-28)
+
+SQL FROM-clause table functions for graph and analyzer management.
+
+### SQL Functions Added
+- `SELECT * FROM create_graph('name')` — create a named graph
+- `SELECT * FROM drop_graph('name')` — drop a named graph
+- `SELECT * FROM create_analyzer('name', 'config_json')` — create a custom text analyzer
+- `SELECT * FROM drop_analyzer('name')` — drop a custom analyzer
+- `SELECT * FROM list_analyzers()` — list all registered analyzers
+- `SELECT * FROM set_table_analyzer('table', 'field', 'analyzer'[, 'phase'])` — assign analyzer to table field
+- `SELECT * FROM graph_add_vertex(id, 'label', 'table'[, 'key=val,...'])` — add graph vertex via SQL
+- `SELECT * FROM graph_add_edge(eid, src, tgt, 'label', 'table'[, 'key=val,...'])` — add graph edge via SQL
+- `SELECT * FROM build_grid_graph('table', rows, cols, 'label')` — build 4-connected grid graph
+- `SELECT * FROM cypher('graph', $$ MATCH ... RETURN ... $$) AS (col agtype)` — Apache AGE compatible Cypher execution
+
 ## 0.1.0 (2026-03-28)
 
 Initial release. Complete 1:1 port of Python UQA v0.22.1 to TypeScript for browser execution.
