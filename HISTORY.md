@@ -1,5 +1,11 @@
 # History
 
+## 0.1.3 (2026-03-28)
+
+### Bug Fixes
+- **set_table_analyzer phase argument**: Fixed SQL `set_table_analyzer()` passing `{ phase: "both" }` object instead of plain string `"both"` to `Engine.setTableAnalyzer()`.
+- **Engine.setTableAnalyzer table lookup**: Fixed `setTableAnalyzer` to use `getTable()` which checks both `Engine._tables` and `SQLCompiler.tables`, so tables created via `CREATE TABLE` SQL are found.
+
 ## 0.1.2 (2026-03-28)
 
 Bug fix: UQA extension functions in SQL WHERE clause now work correctly.

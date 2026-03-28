@@ -336,10 +336,7 @@ export class Engine {
     analyzerName: string,
     phase: "index" | "search" | "both" = "both",
   ): void {
-    const tbl = this._tables.get(tableName);
-    if (tbl === undefined) {
-      throw new Error(`Table '${tableName}' does not exist`);
-    }
+    const tbl = this.getTable(tableName);
     const analyzer = getAnalyzer(analyzerName);
     tbl.invertedIndex.setFieldAnalyzer(field, analyzer, phase);
     if (this._catalog !== null) {

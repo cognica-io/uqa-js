@@ -3473,7 +3473,7 @@ export class SQLCompiler {
     const f = String(ev.evaluate(a[1]!, {}) as string | number);
     const an = String(ev.evaluate(a[2]!, {}) as string | number);
     const ph = a.length > 3 ? String(ev.evaluate(a[3]!, {}) as string | number) : "both";
-    (this._engine as { setTableAnalyzer(t: string, f: string, a: string, o: { phase: string }): void }).setTableAnalyzer(t, f, an, { phase: ph });
+    (this._engine as unknown as { setTableAnalyzer(t: string, f: string, a: string, phase: string): void }).setTableAnalyzer(t, f, an, ph);
     return [{ set_table_analyzer: `analyzer '${an}' assigned to ${t}.${f}` }];
   }
   private _buildGraphAddVertex(a: Record<string, unknown>[], ev: ExprEvaluator): Record<string, unknown>[] {

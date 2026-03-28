@@ -77,3 +77,15 @@ describe("UQA SQL functions", () => {
     expect(e.graphStore.hasGraph("test_g")).toBe(false);
   });
 });
+
+describe("set_table_analyzer via SQL", () => {
+  it("applies CJK analyzer and enables prefix search", async () => {
+    const e = new Engine();
+    await e.sql("CREATE TABLE pages (id INTEGER PRIMARY KEY, title TEXT)");
+    await e.sql("SELECT * FROM set_table_analyzer('pages', 'title', 'standard_cjk', 'both')");
+    e.insert("pages", 1, { title: "bayesian inference" });
+    const r = await e.sql("SELECT id, _score FROM pages WHERE text_match(title, 'bayesi')");
+    expect(r).not.toBeNull();
+    expect(r!.rows.length).toBeGreaterThan(0);
+  });
+});
