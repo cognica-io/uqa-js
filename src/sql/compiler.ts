@@ -514,6 +514,10 @@ function extractConstValue(node: Record<string, unknown>, params: unknown[]): un
   const ival = nodeGet(aConst, "ival");
   if (ival !== null && ival !== undefined) {
     if (typeof ival === "number") return ival;
+    if (typeof ival === "object") {
+      const inner = nodeGet(asObj(ival), "ival");
+      if (inner !== null && inner !== undefined) return Number(inner);
+    }
     return Number(ival);
   }
 
@@ -524,6 +528,11 @@ function extractConstValue(node: Record<string, unknown>, params: unknown[]): un
 
   const sval = nodeGet(aConst, "sval");
   if (sval !== null && sval !== undefined) {
+    if (typeof sval === "string") return sval;
+    if (typeof sval === "object") {
+      const inner = nodeGet(asObj(sval), "sval");
+      if (inner !== null && inner !== undefined) return String(inner as string);
+    }
     return String(sval as string | number);
   }
 
@@ -2629,10 +2638,60 @@ export class SQLCompiler {
 
     // 2. WHERE clause -- filter rows
     if (whereClause !== null && whereClause !== undefined) {
-      rows = rows.filter((row) => {
-        const result = evaluator.evaluate(asObj(whereClause), row);
-        return result === true;
-      });
+      const whereObj = asObj(whereClause);
+      if (SQLCompiler._containsUQAFunction(whereObj)) {
+        // UQA posting-list path
+        const tableName = this._resolveFromTableName(fromClause);
+        if (tableName) {
+          const table = this._tables.get(tableName);
+          if (table) {
+            const ctx = this._contextForTable(table);
+            const [uqaNode, scalarNode] = this._splitUQAConjuncts(whereObj);
+            let op: Operator | null = null;
+            if (uqaNode) {
+              op = this._compileWhere(uqaNode, ctx);
+            }
+            if (op) {
+              const pl = op.execute(ctx);
+              // Build rows from posting list + document store
+              const newRows: Record<string, unknown>[] = [];
+              const ds = table.documentStore;
+              const pkCol = table.primaryKey;
+              for (const entry of pl) {
+                const doc = ds.get(entry.docId);
+                if (!doc) continue;
+                const row: Record<string, unknown> = { ...doc, _score: entry.payload.score };
+                if (pkCol) row[pkCol] = entry.docId;
+                row["_doc_id"] = entry.docId;
+                newRows.push(row);
+              }
+              rows = newRows;
+              // Apply remaining scalar predicates
+              if (scalarNode) {
+                rows = rows.filter((row) => {
+                  const result = evaluator.evaluate(asObj(scalarNode), row);
+                  return result === true;
+                });
+              }
+            }
+          } else {
+            rows = rows.filter((row) => {
+              const result = evaluator.evaluate(whereObj, row);
+              return result === true;
+            });
+          }
+        } else {
+          rows = rows.filter((row) => {
+            const result = evaluator.evaluate(whereObj, row);
+            return result === true;
+          });
+        }
+      } else {
+        rows = rows.filter((row) => {
+          const result = evaluator.evaluate(whereObj, row);
+          return result === true;
+        });
+      }
     }
 
     // 3. GROUP BY clause
@@ -3106,6 +3165,14 @@ export class SQLCompiler {
   }
 
   // -- FROM clause resolution -----------------------------------------
+
+  private _resolveFromTableName(fromClause: Record<string, unknown>[]): string | null {
+    if (fromClause.length !== 1) return null;
+    const item = fromClause[0]!;
+    const rv = item["RangeVar"] as Record<string, unknown> | undefined;
+    if (rv) return (rv["relname"] as string) ?? null;
+    return null;
+  }
 
   private _resolveFrom(
     fromClause: Record<string, unknown>[],

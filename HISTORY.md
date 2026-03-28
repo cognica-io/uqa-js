@@ -1,5 +1,16 @@
 # History
 
+## 0.1.2 (2026-03-28)
+
+Bug fix: UQA extension functions in SQL WHERE clause now work correctly.
+
+### Bug Fixes
+- **WHERE clause UQA function dispatch**: `text_match`, `multi_field_match`, `fuse_log_odds`, `fuse_prob_and`, `fuse_prob_or`, `fuse_prob_not`, `knn_match`, `bayesian_knn_match`, `traverse_match`, `sparse_threshold`, and all other UQA extension functions now correctly compile to posting-list operators when used in WHERE clauses. Previously, these functions fell through to the ExprEvaluator scalar path, which does not know how to evaluate them, resulting in empty results or errors.
+- **A_Const value extraction**: Fixed extraction of string and integer values from libpg-query v17 AST nodes. The parser produces nested structures like `{sval: {sval: "text"}}` and `{ival: {ival: 42}}`, but `extractConstValue()` was returning the inner object instead of unwrapping to the scalar value.
+
+### New Tests
+- `tests/sql/uqa-functions.test.ts`: 9 tests covering `text_match`, `multi_field_match`, `fuse_log_odds`, `fuse_prob_and`, `fuse_prob_or`, `fuse_prob_not`, `sparse_threshold`, `create_analyzer`/`list_analyzers`, `create_graph`/`drop_graph`.
+
 ## 0.1.1 (2026-03-28)
 
 SQL FROM-clause table functions for graph and analyzer management.
