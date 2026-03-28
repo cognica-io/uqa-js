@@ -2,7 +2,7 @@
   "name": "@jaepil/uqa",
   "version": "0.1.0",
   "type": "module",
-  "description": "Unified Query Algebra -- multi-paradigm database engine for the browser",
+  "description": "Unified Query Algebra — multi-paradigm database engine for the browser",
   "license": "AGPL-3.0-only",
   "author": "Cognica, Inc.",
   "homepage": "https://github.com/cognica-io/uqa-js",

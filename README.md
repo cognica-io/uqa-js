@@ -1,4 +1,4 @@
-# UQA-JS -- Unified Query Algebra for the Browser
+# UQA-JS — Unified Query Algebra for the Browser
 
 A multi-paradigm database engine that unifies **relational**, **text retrieval**, **vector search**, **graph query**, and **geospatial** paradigms under a single algebraic structure, using posting lists as the universal abstraction. SQL interface targets **PostgreSQL 17** compatibility.
 
@@ -10,7 +10,7 @@ Modern data systems are fragmented into specialized engines: relational database
 
 ### Posting Lists as Universal Abstraction
 
-The core insight is that **posting lists** -- sorted sequences of `(document_id, payload)` pairs -- can represent result sets from any paradigm. A posting list $L$ is defined as:
+The core insight is that **posting lists** — sorted sequences of `(document_id, payload)` pairs — can represent result sets from any paradigm. A posting list $L$ is defined as:
 
 $$
 L = [(id_1, payload_1),\ (id_2, payload_2),\ \ldots,\ (id_n, payload_n)]
@@ -20,7 +20,7 @@ where $id_i < id_j$ for all $i < j$. A bijection $PL: 2^{\mathcal{D}} \rightarro
 
 ### Boolean Algebra
 
-The structure $(\mathcal{L},\ \cup,\ \cap,\ \overline{\cdot},\ \emptyset,\ \mathcal{D})$ forms a **complete Boolean algebra** -- satisfying commutativity, associativity, distributivity, identity, and complement laws. This means any combination of AND, OR, and NOT across paradigms is algebraically well-defined, and query optimization can exploit lattice-theoretic rewrite rules.
+The structure $(\mathcal{L},\ \cup,\ \cap,\ \overline{\cdot},\ \emptyset,\ \mathcal{D})$ forms a **complete Boolean algebra** — satisfying commutativity, associativity, distributivity, identity, and complement laws. This means any combination of AND, OR, and NOT across paradigms is algebraically well-defined, and query optimization can exploit lattice-theoretic rewrite rules.
 
 ### Cross-Paradigm Operators
 
@@ -48,7 +48,7 @@ $$
 \Phi(L_G) = PL\left(\bigcup_{i=1}^{n} \phi_{G \rightarrow D}(G_i)\right)
 $$
 
-This isomorphism preserves Boolean operations -- $\Phi(L_G^1 \cup_G L_G^2) = \Phi(L_G^1) \cup \Phi(L_G^2)$ -- so graph traversals, pattern matches, and path queries integrate seamlessly with text, vector, and relational operations under the same algebra.
+This isomorphism preserves Boolean operations — $\Phi(L_G^1 \cup_G L_G^2) = \Phi(L_G^1) \cup \Phi(L_G^2)$ — so graph traversals, pattern matches, and path queries integrate seamlessly with text, vector, and relational operations under the same algebra.
 
 ### Vector Calibration
 
@@ -58,7 +58,7 @@ $$
 \text{logit}\ P(R=1 \mid d) = \log \frac{f_R(d)}{f_G(d)} + \text{logit}\ P(R=1)
 $$
 
-where $f_R(d)$ is the local distance density among relevant documents and $f_G(d)$ is the global background density. This has the same additive structure as Bayesian BM25 calibration, establishing a structural identity between lexical and dense retrieval scoring. Both densities are extracted from statistics already computed during ANN index construction and search -- IVF cell populations and intra-cluster distances, HNSW edge distances and search trajectories -- at negligible additional cost. The resulting calibrated vector scores integrate with Bayesian BM25 through additive log-odds:
+where $f_R(d)$ is the local distance density among relevant documents and $f_G(d)$ is the global background density. This has the same additive structure as Bayesian BM25 calibration, establishing a structural identity between lexical and dense retrieval scoring. Both densities are extracted from statistics already computed during ANN index construction and search — IVF cell populations and intra-cluster distances, HNSW edge distances and search trajectories — at negligible additional cost. The resulting calibrated vector scores integrate with Bayesian BM25 through additive log-odds:
 
 $$
 \text{logit}\ P(R \mid d_{vec}, s_{bm25}) = \underbrace{\log \frac{\hat{f}_R(d)}{f_G(d)}}_{\text{calibrated vector}} + \underbrace{\alpha(s_{bm25} - \beta)}_{\text{calibrated lexical}} + \underbrace{\text{logit}\ P_{base}}_{\text{corpus prior}}
@@ -68,7 +68,7 @@ This completes the probabilistic unification of sparse and dense retrieval: both
 
 ### Compositional Completeness
 
-The framework guarantees that **any query expressible as a combination of relational, text, vector, and graph operations** has a representation in the unified algebra (Theorem 3.3.5). This is not merely an interface unification -- the algebraic closure ensures that cross-paradigm queries (e.g., "find papers cited by graph neighbors whose embeddings are similar to a query vector and whose titles match a keyword") are first-class operations with well-defined optimization rules.
+The framework guarantees that **any query expressible as a combination of relational, text, vector, and graph operations** has a representation in the unified algebra (Theorem 3.3.5). This is not merely an interface unification — the algebraic closure ensures that cross-paradigm queries (e.g., "find papers cited by graph neighbors whose embeddings are similar to a query vector and whose titles match a keyword") are first-class operations with well-defined optimization rules.
 
 For full formal treatment, see [Paper 1](docs/papers/1.%20A%20Unified%20Mathematical%20Framework%20for%20Query%20Algebras%20Across%20Heterogeneous%20Data%20Paradigms.pdf), [Paper 2](docs/papers/2.%20Extending%20the%20Unified%20Mathematical%20Framework%20to%20Support%20Graph%20Data%20Structures.pdf), [Paper 3](docs/papers/3.%20Bayesian%20BM25%20-%20A%20Probabilistic%20Framework%20for%20Hybrid%20Text%20and%20Vector%20Search.pdf), and [Paper 5](docs/papers/5.%20Vector%20Scores%20as%20Likelihood%20Ratios%20-%20Index-Derived%20Bayesian%20Calibration%20for%20Hybrid%20Search.pdf).
 
@@ -446,7 +446,7 @@ tests/            2,832 tests across 108 test files
 |----------|-------------|
 | `column @@ 'query'` | Full-text search operator with query string mini-language (boolean, phrase, field targeting, hybrid text+vector) |
 | `text_match(field, 'query')` | Full-text search with BM25 scoring |
-| `bayesian_match(field, 'query')` | Bayesian BM25 -- calibrated P(relevant) in [0,1] |
+| `bayesian_match(field, 'query')` | Bayesian BM25 — calibrated P(relevant) in [0,1] |
 | `knn_match(field, vector, k)` | K-nearest neighbor vector search (vector as `ARRAY[...]` or `$N`) |
 | `traverse_match(start, 'label', hops)` | Graph reachability as a scored signal |
 | `path_filter(path, value)` | Hierarchical equality filter (any-match on arrays) |
@@ -568,7 +568,7 @@ All data is persisted to SQLite (via sql.js WASM) when an engine is created with
 
 - Algebraic simplification (idempotent intersection/union, absorption law, empty elimination)
 - Cost-based optimization with equi-depth histograms and Most Common Values (MCV)
-- **DPccp join order optimization** (Moerkotte & Neumann, 2006) -- O(3^n) dynamic programming over connected subgraph complement pairs; produces optimal bushy join trees for INNER JOIN chains with 2+ relations; greedy fallback for 16+ relations
+- **DPccp join order optimization** (Moerkotte & Neumann, 2006) — O(3^n) dynamic programming over connected subgraph complement pairs; produces optimal bushy join trees for INNER JOIN chains with 2+ relations; greedy fallback for 16+ relations
 - Filter pushdown into intersections (recursive through nested IntersectOperators)
 - Vector threshold merge with floating-point tolerance
 - Intersect operand reordering by execution cost (cheapest first)
@@ -783,6 +783,6 @@ The theoretical foundation is described in the following papers (available in `d
 
 ## License
 
-AGPL-3.0-only -- see [LICENSE](LICENSE).
+AGPL-3.0-only — see [LICENSE](LICENSE).
 
 Copyright (c) 2023-2026 Cognica, Inc.
