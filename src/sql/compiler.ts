@@ -98,7 +98,7 @@ import {
   createEdge,
 } from "../core/types.js";
 import type { PostingEntry as PostingEntryType, Predicate } from "../core/types.js";
-import { listAnalyzers as listAnalyzersFn } from "../analysis/analyzer.js";
+import { listAnalyzers as listAnalyzersFn, getAnalyzer as getAnalyzerFn } from "../analysis/analyzer.js";
 import { CypherCompiler } from "../graph/cypher/compiler.js";
 import type { GraphStore } from "../storage/abc/graph-store.js";
 import type { IndexStats } from "../core/types.js";
@@ -704,6 +704,10 @@ export class SQLCompiler {
   private _foreignServers: Map<string, ForeignServer>;
   private _foreignTables: Map<string, ForeignTable>;
   private _fdwHandlers: Map<string, FDWHandler>;
+  private _indexes: Map<
+    string,
+    { name: string; tableName: string; method: string; columns: string[] }
+  >;
 
   constructor(engine?: unknown) {
     this._tables = new Map();
@@ -720,6 +724,7 @@ export class SQLCompiler {
     this._foreignServers = new Map();
     this._foreignTables = new Map();
     this._fdwHandlers = new Map();
+    this._indexes = new Map();
   }
 
   /**
@@ -1398,8 +1403,42 @@ export class SQLCompiler {
     return null;
   }
 
-  private _compileDropIndex(_stmt: Record<string, unknown>): SQLResult | null {
-    // Index operations are no-op in in-memory mode
+  private _compileDropIndex(stmt: Record<string, unknown>): SQLResult | null {
+    const objects = asList(nodeGet(stmt, "objects"));
+    const ifExists = nodeGet(stmt, "missing_ok") === true;
+
+    for (const obj of objects) {
+      const items = asList(obj);
+      let idxName: string;
+      if (items.length > 0) {
+        idxName = extractString(items[items.length - 1]!);
+      } else {
+        idxName = extractString(obj);
+      }
+      if (!idxName) continue;
+
+      const idx = this._indexes.get(idxName);
+      if (idx === undefined) {
+        if (ifExists) continue;
+        throw new Error(`Index "${idxName}" does not exist`);
+      }
+
+      // If this was a GIN index, remove the FTS fields and clear the index data
+      if (idx.method === "gin") {
+        const table = this._tables.get(idx.tableName);
+        if (table !== undefined) {
+          for (const col of idx.columns) {
+            table.ftsFields.delete(col);
+          }
+          // If no FTS fields remain, clear the inverted index entirely
+          if (table.ftsFields.size === 0) {
+            table.invertedIndex.clear();
+          }
+        }
+      }
+
+      this._indexes.delete(idxName);
+    }
     return null;
   }
 
@@ -1572,9 +1611,85 @@ export class SQLCompiler {
   // DDL: CREATE INDEX
   // ==================================================================
 
-  private _compileCreateIndex(_stmt: Record<string, unknown>): SQLResult | null {
-    // Index creation is a no-op in in-memory mode since our tables
-    // use built-in indexes (inverted, vector, spatial).
+  private _compileCreateIndex(stmt: Record<string, unknown>): SQLResult | null {
+    const idxName = nodeStr(stmt, "idxname");
+    const ifNotExists = nodeGet(stmt, "if_not_exists") === true;
+    const relation = asObj(nodeGet(stmt, "relation"));
+    const tableName = extractRelName(relation);
+    const method = (nodeStr(stmt, "accessMethod") || "btree").toLowerCase();
+
+    if (this._indexes.has(idxName)) {
+      if (ifNotExists) return null;
+      throw new Error(`Index "${idxName}" already exists`);
+    }
+
+    const table = this._tables.get(tableName);
+    if (!table) {
+      throw new Error(`Table "${tableName}" does not exist`);
+    }
+
+    // Extract column names from indexParams
+    const indexParams = asList(nodeGet(stmt, "indexParams"));
+    const columns: string[] = [];
+    for (const param of indexParams) {
+      const elem = asObj(nodeGet(param, "IndexElem") ?? param);
+      const colName = nodeStr(elem, "name");
+      if (colName) columns.push(colName);
+    }
+
+    if (columns.length === 0) {
+      throw new Error("CREATE INDEX requires at least one column");
+    }
+
+    // Extract WITH options (e.g., analyzer = 'name')
+    const options: Record<string, string> = {};
+    const optList = asList(nodeGet(stmt, "options"));
+    for (const opt of optList) {
+      const optObj = asObj(nodeGet(opt, "DefElem") ?? opt);
+      const defname = nodeStr(optObj, "defname");
+      const argNode = asObj(nodeGet(optObj, "arg"));
+      const argVal =
+        nodeStr(argNode, "sval") ||
+        nodeStr(asObj(nodeGet(argNode, "String") ?? {}), "sval");
+      if (defname) options[defname] = argVal;
+    }
+
+    if (method === "gin") {
+      // GIN index = FTS inverted index on specified columns
+      for (const col of columns) {
+        if (!table.columns.has(col)) {
+          throw new Error(
+            `Column "${col}" does not exist in table "${tableName}"`,
+          );
+        }
+        table.ftsFields.add(col);
+      }
+
+      // Apply analyzer if specified
+      const analyzerName = options["analyzer"];
+      if (analyzerName) {
+        const analyzer = getAnalyzerFn(analyzerName);
+        for (const col of columns) {
+          table.invertedIndex.setFieldAnalyzer(col, analyzer, "both");
+        }
+      }
+
+      // Backfill: index existing rows for the newly added FTS fields
+      for (const [docId, doc] of table.documentStore.iterAll()) {
+        const textFields: Record<string, string> = {};
+        for (const col of columns) {
+          const v = (doc as Record<string, unknown>)[col];
+          if (typeof v === "string") textFields[col] = v;
+        }
+        if (Object.keys(textFields).length > 0) {
+          table.invertedIndex.addDocument(docId, textFields);
+        }
+      }
+    }
+    // btree, hnsw, ivf, rtree: vector/spatial indexes are auto-created
+    // from column types, so these remain no-ops for now.
+
+    this._indexes.set(idxName, { name: idxName, tableName, method, columns });
     return null;
   }
 
@@ -2066,18 +2181,21 @@ export class SQLCompiler {
     }
 
     // Update document
-    table.invertedIndex.removeDocument(docId);
+    if (table.ftsFields.size > 0) {
+      table.invertedIndex.removeDocument(docId);
+    }
     table.documentStore.put(docId, newDoc);
 
-    // Re-index text fields
-    const textFields: Record<string, string> = {};
-    for (const [k, v] of Object.entries(newDoc)) {
-      if (typeof v === "string") {
-        textFields[k] = v;
+    // Re-index FTS fields
+    if (table.ftsFields.size > 0) {
+      const textFields: Record<string, string> = {};
+      for (const field of table.ftsFields) {
+        const v = newDoc[field];
+        if (typeof v === "string") textFields[field] = v;
       }
-    }
-    if (Object.keys(textFields).length > 0) {
-      table.invertedIndex.addDocument(docId, textFields);
+      if (Object.keys(textFields).length > 0) {
+        table.invertedIndex.addDocument(docId, textFields);
+      }
     }
   }
 
@@ -2159,16 +2277,21 @@ export class SQLCompiler {
       }
 
       // Update indexes and document
-      table.invertedIndex.removeDocument(docId);
+      if (table.ftsFields.size > 0) {
+        table.invertedIndex.removeDocument(docId);
+      }
       table.documentStore.put(docId, updatedDoc);
 
-      // Re-index text fields
-      const textFields: Record<string, string> = {};
-      for (const [k, v] of Object.entries(updatedDoc)) {
-        if (typeof v === "string") textFields[k] = v;
-      }
-      if (Object.keys(textFields).length > 0) {
-        table.invertedIndex.addDocument(docId, textFields);
+      // Re-index FTS fields
+      if (table.ftsFields.size > 0) {
+        const textFields: Record<string, string> = {};
+        for (const field of table.ftsFields) {
+          const v = updatedDoc[field];
+          if (typeof v === "string") textFields[field] = v;
+        }
+        if (Object.keys(textFields).length > 0) {
+          table.invertedIndex.addDocument(docId, textFields);
+        }
       }
 
       if (hasReturning) {
@@ -2261,15 +2384,20 @@ export class SQLCompiler {
           }
         }
 
-        table.invertedIndex.removeDocument(docId);
+        if (table.ftsFields.size > 0) {
+          table.invertedIndex.removeDocument(docId);
+        }
         table.documentStore.put(docId, newDoc);
 
-        const textFields: Record<string, string> = {};
-        for (const [k, v] of Object.entries(newDoc)) {
-          if (typeof v === "string") textFields[k] = v;
-        }
-        if (Object.keys(textFields).length > 0) {
-          table.invertedIndex.addDocument(docId, textFields);
+        if (table.ftsFields.size > 0) {
+          const textFields: Record<string, string> = {};
+          for (const field of table.ftsFields) {
+            const v = newDoc[field];
+            if (typeof v === "string") textFields[field] = v;
+          }
+          if (Object.keys(textFields).length > 0) {
+            table.invertedIndex.addDocument(docId, textFields);
+          }
         }
 
         if (hasReturning) {
@@ -2348,7 +2476,9 @@ export class SQLCompiler {
     }
 
     for (const docId of toDelete) {
-      table.invertedIndex.removeDocument(docId);
+      if (table.ftsFields.size > 0) {
+        table.invertedIndex.removeDocument(docId);
+      }
       table.documentStore.delete(docId);
     }
 
@@ -2415,7 +2545,9 @@ export class SQLCompiler {
     }
 
     for (const docId of toDelete) {
-      table.invertedIndex.removeDocument(docId);
+      if (table.ftsFields.size > 0) {
+        table.invertedIndex.removeDocument(docId);
+      }
       table.documentStore.delete(docId);
     }
 
@@ -3987,6 +4119,17 @@ export class SQLCompiler {
             }
           }
         }
+      }
+      // Include indexes tracked by the compiler
+      for (const idx of this._indexes.values()) {
+        const methodStr = idx.method !== "btree" ? ` USING ${idx.method}` : "";
+        rows.push({
+          schemaname: "public",
+          tablename: idx.tableName,
+          indexname: idx.name,
+          tablespace: "",
+          indexdef: `CREATE INDEX ${idx.name} ON ${idx.tableName}${methodStr} (${idx.columns.join(", ")})`,
+        });
       }
       return this._applyAlias(rows, alias);
     }

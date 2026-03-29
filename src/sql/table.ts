@@ -217,6 +217,7 @@ export class Table {
   ) => void)[];
   documentStore: DocumentStore;
   invertedIndex: InvertedIndex;
+  ftsFields: Set<string>;
   vectorIndexes: Map<string, VectorIndex>;
   spatialIndexes: Map<string, SpatialIndex>;
   private _stats: Map<string, ColumnStats>;
@@ -253,6 +254,7 @@ export class Table {
     void conn; // reserved for future backend selection
     this.documentStore = new MemoryDocumentStore();
     this.invertedIndex = new MemoryInvertedIndex();
+    this.ftsFields = new Set();
 
     // Create vector indexes for VECTOR columns
     for (const col of columns) {
@@ -426,14 +428,17 @@ export class Table {
     this.documentStore.put(docId, coerced);
 
     let indexed: IndexedTerms | null = null;
-    const textFields: Record<string, string> = {};
-    for (const [k, v] of Object.entries(coerced)) {
-      if (typeof v === "string") {
-        textFields[k] = v;
+    if (this.ftsFields.size > 0) {
+      const textFields: Record<string, string> = {};
+      for (const field of this.ftsFields) {
+        const v = coerced[field];
+        if (typeof v === "string") {
+          textFields[field] = v;
+        }
       }
-    }
-    if (Object.keys(textFields).length > 0) {
-      indexed = this.invertedIndex.addDocument(docId, textFields);
+      if (Object.keys(textFields).length > 0) {
+        indexed = this.invertedIndex.addDocument(docId, textFields);
+      }
     }
 
     for (const [fieldName, vec] of Object.entries(vectors)) {

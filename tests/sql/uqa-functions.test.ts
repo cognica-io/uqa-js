@@ -4,6 +4,7 @@ import { Engine } from "../../src/engine.js";
 async function makeEngine(): Promise<Engine> {
   const e = new Engine();
   await e.sql("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, body TEXT)");
+  await e.sql("CREATE INDEX idx_docs_fts ON docs USING gin (title, body)");
   e.insert("docs", 1, { title: "machine learning basics", body: "algorithms for ML research" });
   e.insert("docs", 2, { title: "deep learning neural networks", body: "CNN and RNN models" });
   e.insert("docs", 3, { title: "cooking recipes", body: "pasta and pizza" });
@@ -82,6 +83,7 @@ describe("set_table_analyzer via SQL", () => {
   it("applies CJK analyzer and enables prefix search", async () => {
     const e = new Engine();
     await e.sql("CREATE TABLE pages (id INTEGER PRIMARY KEY, title TEXT)");
+    await e.sql("CREATE INDEX idx_pages_fts ON pages USING gin (title)");
     await e.sql("SELECT * FROM set_table_analyzer('pages', 'title', 'standard_cjk', 'both')");
     e.insert("pages", 1, { title: "bayesian inference" });
     const r = await e.sql("SELECT id, _score FROM pages WHERE text_match(title, 'bayesi')");

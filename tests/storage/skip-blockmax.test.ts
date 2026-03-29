@@ -560,6 +560,7 @@ describe("EngineIntegration", () => {
     const { Engine } = await import("../../src/engine.js");
     const engine = new Engine();
     await engine.sql("CREATE TABLE docs (id SERIAL PRIMARY KEY, body TEXT)");
+    await engine.sql("CREATE INDEX idx_docs_body ON docs USING gin (body)");
     for (let i = 1; i < 200; i++) {
       await engine.sql(`INSERT INTO docs (body) VALUES ('alpha term${String(i)}')`);
     }

@@ -244,6 +244,7 @@ describe("UpdateTextIndex", () => {
   // Python parity gap: not yet implemented in TS SQL compiler
   it("update reindexes text", async () => {
     const engine = await makeProductsEngine();
+    await engine.sql("CREATE INDEX idx_products_name ON products USING gin (name)");
     const r1 = await engine.sql(
       "SELECT id FROM products WHERE text_match(name, 'widget')",
     );
@@ -266,6 +267,7 @@ describe("UpdateTextIndex", () => {
   // Python parity gap: not yet implemented in TS SQL compiler
   it("update non text preserves index", async () => {
     const engine = await makeProductsEngine();
+    await engine.sql("CREATE INDEX idx_products_name ON products USING gin (name)");
     await engine.sql("UPDATE products SET price = 99.99 WHERE id = 1");
     const r = await engine.sql(
       "SELECT id FROM products WHERE text_match(name, 'widget')",
@@ -366,6 +368,7 @@ describe("DeleteTextIndex", () => {
   // Python parity gap: not yet implemented in TS SQL compiler
   it("delete removes from index", async () => {
     const engine = await makeProductsEngine();
+    await engine.sql("CREATE INDEX idx_products_name ON products USING gin (name)");
     const r1 = await engine.sql(
       "SELECT id FROM products WHERE text_match(name, 'widget')",
     );
@@ -382,6 +385,7 @@ describe("DeleteTextIndex", () => {
   // Python parity gap: not yet implemented in TS SQL compiler
   it("delete preserves other index entries", async () => {
     const engine = await makeProductsEngine();
+    await engine.sql("CREATE INDEX idx_products_name ON products USING gin (name)");
     await engine.sql("DELETE FROM products WHERE id = 1");
     const r = await engine.sql(
       "SELECT id FROM products WHERE text_match(name, 'gadget')",

@@ -60,6 +60,7 @@ describe("TestMultiFieldSearchOperator", () => {
   async function makeEngine(): Promise<Engine> {
     const e = new Engine();
     await e.sql("CREATE TABLE docs (id SERIAL PRIMARY KEY, title TEXT, body TEXT)");
+    await e.sql("CREATE INDEX idx_docs_fts ON docs USING gin (title, body)");
     await e.sql(
       "INSERT INTO docs (title, body) VALUES ('machine learning guide', 'intro to ML algorithms')",
     );
@@ -116,6 +117,7 @@ describe("TestMultiFieldSQL", () => {
   async function makeEngine(): Promise<Engine> {
     const e = new Engine();
     await e.sql("CREATE TABLE docs (id SERIAL PRIMARY KEY, title TEXT, body TEXT)");
+    await e.sql("CREATE INDEX idx_docs_fts ON docs USING gin (title, body)");
     await e.sql(
       "INSERT INTO docs (title, body) VALUES ('machine learning', 'algorithms for ML')",
     );
@@ -157,6 +159,7 @@ describe("TestMultiFieldQueryBuilder", () => {
   async function makeEngine(): Promise<Engine> {
     const e = new Engine();
     await e.sql("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, body TEXT)");
+    await e.sql("CREATE INDEX idx_docs_fts ON docs USING gin (title, body)");
     e.insert("docs", 1, { title: "machine learning", body: "algorithms for ML" });
     return e;
   }

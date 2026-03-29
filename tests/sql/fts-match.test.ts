@@ -217,6 +217,7 @@ describe("FTSParser", () => {
 async function makeEngineWithDocs(): Promise<Engine> {
   const engine = new Engine();
   await engine.sql("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, body TEXT)");
+  await engine.sql("CREATE INDEX idx_docs_fts ON docs USING gin (title, body)");
   await engine.sql(
     "INSERT INTO docs VALUES (1, 'neural network theory', 'attention mechanisms for deep learning')",
   );

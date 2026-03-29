@@ -164,14 +164,15 @@ export class Engine {
 
     tbl.documentStore.put(docId, stored);
 
-    const textFields: Record<string, string> = {};
-    for (const [k, v] of Object.entries(stored)) {
-      if (typeof v === "string") {
-        textFields[k] = v;
+    if (tbl.ftsFields.size > 0) {
+      const textFields: Record<string, string> = {};
+      for (const field of tbl.ftsFields) {
+        const v = stored[field];
+        if (typeof v === "string") textFields[field] = v;
       }
-    }
-    if (Object.keys(textFields).length > 0) {
-      tbl.invertedIndex.addDocument(docId, textFields);
+      if (Object.keys(textFields).length > 0) {
+        tbl.invertedIndex.addDocument(docId, textFields);
+      }
     }
 
     if (vecColForIndex !== null && vecArray !== null) {
@@ -196,7 +197,9 @@ export class Engine {
       throw new Error(`Table '${table}' does not exist`);
     }
     tbl.documentStore.delete(docId);
-    tbl.invertedIndex.removeDocument(docId);
+    if (tbl.ftsFields.size > 0) {
+      tbl.invertedIndex.removeDocument(docId);
+    }
   }
 
   // -- Graph management -------------------------------------------------------
@@ -501,17 +504,19 @@ export class Engine {
     // Write directly to the document store (bypasses SQL layer)
     t.documentStore.put(docId, document);
 
-    // Index text fields in the inverted index
-    const textFields: Record<string, string> = {};
-    for (const [colName, colDef] of t.columns) {
-      const value = document[colName];
-      if (colDef.pythonType === "string" && value !== null && value !== undefined) {
-        textFields[colName] =
-          typeof value === "string" ? value : String(value as number);
+    // Index FTS fields in the inverted index
+    if (t.ftsFields.size > 0) {
+      const textFields: Record<string, string> = {};
+      for (const field of t.ftsFields) {
+        const value = document[field];
+        if (value !== null && value !== undefined) {
+          textFields[field] =
+            typeof value === "string" ? value : String(value as number);
+        }
       }
-    }
-    if (Object.keys(textFields).length > 0) {
-      t.invertedIndex.addDocument(docId, textFields);
+      if (Object.keys(textFields).length > 0) {
+        t.invertedIndex.addDocument(docId, textFields);
+      }
     }
 
     // Index vector columns

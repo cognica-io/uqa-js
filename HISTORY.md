@@ -11,12 +11,16 @@ Foreign Data Wrapper integration with the SQL execution engine.
 - **Arrow FDW**: Inline JSON data and base64 Arrow IPC buffer paths fully functional through SQL. Predicate pushdown, column projection, and LIMIT work end-to-end.
 - **Mixed queries**: Foreign tables can be joined with local tables, used in subqueries, and combined across different FDW types (DuckDB + Arrow).
 
+- **Explicit FTS index via CREATE INDEX USING gin**: Full-text search inverted indexes are no longer created automatically on every TEXT column. FTS indexing now requires an explicit `CREATE INDEX ... USING gin (column)` statement, matching PostgreSQL semantics. Supports multi-column indexes and optional analyzer specification via `WITH (analyzer = 'name')`. Existing rows are backfilled at index creation time. `DROP INDEX` removes the FTS index and clears indexed data.
+
 ### Bug Fixes
 - **DROP FOREIGN TABLE**: Fixed AST parsing that silently failed to extract the table name. libpg-query wraps `DROP FOREIGN TABLE` objects in a `List` node (`{"List": {"items": [...]}}`) unlike `DROP SERVER` which uses flat `String` nodes. The previous code did not unwrap the `List`, causing `DROP FOREIGN TABLE` to be a no-op.
+- **Removed automatic FTS indexing**: Previously all TEXT/VARCHAR columns were indexed into the inverted index on every INSERT/UPDATE, wasting memory and CPU for columns that were never searched. Now only explicitly indexed columns are maintained.
 
 ### Tests
 - 2,877 tests across 110 test files
-- Added 33 FDW integration tests (`tests/fdw/fdw-integration.test.ts`) exercising the full `Engine.sql()` -> `SQLCompiler` path: DuckDB FDW (select, where, limit, order by, group by, alias, information_schema, drop), Arrow FDW (select, where, projection, limit, aggregate), mixed foreign+local joins, subqueries, multiple servers, error cases
+- Added 33 FDW integration tests (`tests/fdw/fdw-integration.test.ts`) exercising the full `Engine.sql()` -> `SQLCompiler` path
+- Updated 7 test files to use explicit `CREATE INDEX ... USING gin` before FTS queries
 
 ## 0.1.4 (2026-03-29)
 

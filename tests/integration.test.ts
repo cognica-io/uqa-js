@@ -47,6 +47,9 @@ describe("Table CRUD", () => {
       createColumnDef("title", "text", { pythonType: "string" }),
       createColumnDef("abstract", "text", { pythonType: "string" }),
     ]);
+    // Register TEXT columns for FTS indexing (equivalent to CREATE INDEX USING gin)
+    table.ftsFields.add("title");
+    table.ftsFields.add("abstract");
     table.insert({
       title: "neural network basics",
       abstract: "introduction to neural networks",
