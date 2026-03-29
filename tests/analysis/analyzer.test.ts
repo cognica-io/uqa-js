@@ -62,6 +62,30 @@ describe("standardCJKAnalyzer", () => {
     // "test" -> stem -> ngrams
     expect(tokens.length).toBeGreaterThan(1);
   });
+
+  it("tokenizes Korean as space-delimited words, not single characters", () => {
+    const a = standardCJKAnalyzer();
+    const tokens = a.analyze("검색 기능 개발이");
+    // Hangul syllables should be grouped as words by whitespace,
+    // then the n-gram filter generates 2-gram and 3-gram sub-tokens.
+    expect(tokens).toContain("검색");
+    expect(tokens).toContain("기능");
+    expect(tokens).toContain("개발");
+    expect(tokens).toContain("발이");
+    expect(tokens).toContain("개발이");
+  });
+
+  it("tokenizes CJK ideographs as contiguous tokens", () => {
+    const a = standardCJKAnalyzer();
+    const tokens = a.analyze("全文検索");
+    // CJK ideographs with no whitespace become one token,
+    // then n-gram filter produces sub-tokens.
+    expect(tokens).toContain("全文");
+    expect(tokens).toContain("文検");
+    expect(tokens).toContain("検索");
+    expect(tokens).toContain("全文検");
+    expect(tokens).toContain("文検索");
+  });
 });
 
 describe("keywordAnalyzer", () => {

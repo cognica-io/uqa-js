@@ -1,5 +1,14 @@
 # History
 
+## 0.1.4 (2026-03-29)
+
+### Bug Fixes
+- **StandardTokenizer Unicode support**: Fixed `StandardTokenizer` regex from `/\w+/gu` to `/[\p{L}\p{N}_]+/gu` so it matches Unicode word characters (Hangul, CJK, etc.). JavaScript's `\w` only matches ASCII `[a-zA-Z0-9_]` even with the `u` flag, unlike Python's `\w` which matches all Unicode letters. This caused Korean text like "검색 기능" to produce zero tokens instead of `["검색", "기능"]`.
+
+### Tests
+- 2,844 tests across 109 test files
+- Added Korean and CJK tokenization tests for `standardCJKAnalyzer`
+
 ## 0.1.3 (2026-03-28)
 
 ### Bug Fixes

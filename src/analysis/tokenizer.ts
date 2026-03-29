@@ -53,7 +53,7 @@ export class WhitespaceTokenizer extends Tokenizer {
 
 // -- StandardTokenizer --------------------------------------------------------
 
-const WORD_RE = /\w+/gu;
+const WORD_RE = /[\p{L}\p{N}_]+/gu;
 
 export class StandardTokenizer extends Tokenizer {
   tokenize(text: string): string[] {
