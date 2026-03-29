@@ -1,5 +1,23 @@
 # History
 
+## 0.1.5 (2026-03-29)
+
+Foreign Data Wrapper integration with the SQL execution engine.
+
+### Features
+- **FDW handler dispatch in SQL compiler**: `SELECT` queries on foreign tables now route through `DuckDBFDWHandler` or `ArrowFDWHandler` via the SQL compiler's FROM-clause resolution. Previously, `CREATE FOREIGN SERVER` and `CREATE FOREIGN TABLE` stored metadata only; `SELECT * FROM foreign_table` raised "Table does not exist".
+- **FDW handler lifecycle management**: Handlers are cached per server name and reused across queries. `DROP SERVER` closes the cached handler. `Engine.close()` releases all FDW handlers.
+- **DuckDB FDW**: Inline JSON data path fully functional through SQL. Predicate pushdown, column projection, and LIMIT work end-to-end.
+- **Arrow FDW**: Inline JSON data and base64 Arrow IPC buffer paths fully functional through SQL. Predicate pushdown, column projection, and LIMIT work end-to-end.
+- **Mixed queries**: Foreign tables can be joined with local tables, used in subqueries, and combined across different FDW types (DuckDB + Arrow).
+
+### Bug Fixes
+- **DROP FOREIGN TABLE**: Fixed AST parsing that silently failed to extract the table name. libpg-query wraps `DROP FOREIGN TABLE` objects in a `List` node (`{"List": {"items": [...]}}`) unlike `DROP SERVER` which uses flat `String` nodes. The previous code did not unwrap the `List`, causing `DROP FOREIGN TABLE` to be a no-op.
+
+### Tests
+- 2,877 tests across 110 test files
+- Added 33 FDW integration tests (`tests/fdw/fdw-integration.test.ts`) exercising the full `Engine.sql()` -> `SQLCompiler` path: DuckDB FDW (select, where, limit, order by, group by, alias, information_schema, drop), Arrow FDW (select, where, projection, limit, aggregate), mixed foreign+local joins, subqueries, multiple servers, error cases
+
 ## 0.1.4 (2026-03-29)
 
 ### Bug Fixes

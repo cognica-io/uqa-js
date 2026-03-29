@@ -162,6 +162,13 @@ import { QueryOptimizer } from "../planner/optimizer.js";
 import type { ColumnStats } from "./table.js";
 import { PlanExecutor } from "../planner/executor.js";
 
+// -- FDW handler imports --------------------------------------------------------
+
+import type { FDWHandler } from "../fdw/handler.js";
+import type { ForeignServer, ForeignTable } from "../fdw/foreign-table.js";
+import { DuckDBFDWHandler } from "../fdw/duckdb-handler.js";
+import { ArrowFDWHandler } from "../fdw/arrow-handler.js";
+
 // -- SQLResult ------------------------------------------------------------------
 
 export interface SQLResult {
@@ -694,19 +701,9 @@ export class SQLCompiler {
   private _shadowedTables: Map<string, Table>;
   private _inlinedCTEs: Map<string, Record<string, unknown>>;
   private _correlatedOuterRow: Record<string, unknown> | null;
-  private _foreignServers: Map<
-    string,
-    { name: string; fdwType: string; options: Record<string, string> }
-  >;
-  private _foreignTables: Map<
-    string,
-    {
-      name: string;
-      serverName: string;
-      columns: Map<string, ColumnDef>;
-      options: Record<string, string>;
-    }
-  >;
+  private _foreignServers: Map<string, ForeignServer>;
+  private _foreignTables: Map<string, ForeignTable>;
+  private _fdwHandlers: Map<string, FDWHandler>;
 
   constructor(engine?: unknown) {
     this._tables = new Map();
@@ -722,6 +719,7 @@ export class SQLCompiler {
     this._correlatedOuterRow = null;
     this._foreignServers = new Map();
     this._foreignTables = new Map();
+    this._fdwHandlers = new Map();
   }
 
   /**
@@ -748,6 +746,16 @@ export class SQLCompiler {
 
   get engine(): unknown {
     return this._engine;
+  }
+
+  /**
+   * Close all cached FDW handlers and release their resources.
+   */
+  closeFDWHandlers(): void {
+    for (const handler of this._fdwHandlers.values()) {
+      handler.close();
+    }
+    this._fdwHandlers.clear();
   }
 
   /**
@@ -1496,6 +1504,12 @@ export class SQLCompiler {
             );
           }
         }
+        // Close cached handler if present
+        const handler = this._fdwHandlers.get(name);
+        if (handler !== undefined) {
+          handler.close();
+          this._fdwHandlers.delete(name);
+        }
         this._foreignServers.delete(name);
       } else if (!ifExists) {
         throw new Error(`Foreign server '${name}' does not exist`);
@@ -1509,9 +1523,17 @@ export class SQLCompiler {
     const ifExists = nodeGet(stmt, "missing_ok") === true;
 
     for (const obj of objects) {
-      const items = asList(obj);
+      // DROP FOREIGN TABLE objects are wrapped in a List node:
+      //   { "List": { "items": [ { "String": { "sval": "name" } } ] } }
       let tableName: string;
-      if (items.length > 0) {
+      const listNode = nodeGet(obj, "List");
+      if (listNode !== null && listNode !== undefined) {
+        const items = asList(nodeGet(asObj(listNode), "items"));
+        tableName = items.length > 0
+          ? extractString(items[items.length - 1]!)
+          : "";
+      } else if (Array.isArray(obj)) {
+        const items = obj as Record<string, unknown>[];
         tableName = extractString(items[items.length - 1]!);
       } else {
         tableName = extractString(obj);
@@ -3247,6 +3269,13 @@ export class SQLCompiler {
         return this._applyAlias(rows, alias ?? tableName);
       }
 
+      // Check for foreign table
+      const foreignTable = this._foreignTables.get(tableName);
+      if (foreignTable !== undefined) {
+        const rows = this._scanForeignTable(foreignTable);
+        return this._applyAlias(rows, alias ?? tableName);
+      }
+
       const table = this._tables.get(tableName);
       if (!table) {
         throw new Error(`Table "${tableName}" does not exist`);
@@ -3284,6 +3313,44 @@ export class SQLCompiler {
     }
 
     throw new Error("Unsupported FROM clause item");
+  }
+
+  // ==================================================================
+  // FDW: handler dispatch
+  // ==================================================================
+
+  /**
+   * Get or create an FDW handler for the given server name.
+   * Handlers are cached by server name and reused across queries.
+   */
+  private _getFDWHandler(serverName: string): FDWHandler {
+    const cached = this._fdwHandlers.get(serverName);
+    if (cached !== undefined) return cached;
+
+    const server = this._foreignServers.get(serverName);
+    if (server === undefined) {
+      throw new Error(`Foreign server '${serverName}' does not exist`);
+    }
+
+    let handler: FDWHandler;
+    if (server.fdwType === "duckdb_fdw") {
+      handler = new DuckDBFDWHandler(server);
+    } else if (server.fdwType === "arrow_fdw") {
+      handler = new ArrowFDWHandler(server);
+    } else {
+      throw new Error(`Unsupported FDW type: '${server.fdwType}'`);
+    }
+
+    this._fdwHandlers.set(serverName, handler);
+    return handler;
+  }
+
+  /**
+   * Scan a foreign table via the appropriate FDW handler.
+   */
+  private _scanForeignTable(foreignTable: ForeignTable): Record<string, unknown>[] {
+    const handler = this._getFDWHandler(foreignTable.serverName);
+    return handler.scan(foreignTable);
   }
 
   private _applyAlias(

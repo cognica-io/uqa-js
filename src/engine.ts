@@ -897,7 +897,8 @@ export class Engine {
       this._transaction = null;
     }
 
-    // Clear foreign data
+    // Close all FDW handlers and clear foreign data
+    this._compiler.closeFDWHandlers();
     this._foreignTables.clear();
     this._foreignServers.clear();
 

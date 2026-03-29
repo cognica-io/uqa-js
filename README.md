@@ -235,6 +235,59 @@ await engine.sql(`
 `);
 ```
 
+### Foreign Data Wrappers (DuckDB / Arrow)
+
+```typescript
+// Create a DuckDB FDW server and foreign table pointing to Parquet files
+await engine.sql(`
+  CREATE SERVER analytics FOREIGN DATA WRAPPER duckdb_fdw
+  OPTIONS (path ':memory:')
+`);
+
+await engine.sql(`
+  CREATE FOREIGN TABLE events (
+    event_id INTEGER,
+    user_id INTEGER,
+    event_type TEXT,
+    ts TIMESTAMP
+  ) SERVER analytics OPTIONS (source 'events/*.parquet')
+`);
+
+// Query foreign tables with full SQL -- predicates, joins, aggregates
+const result = await engine.sql(`
+  SELECT event_type, COUNT(*) AS cnt
+  FROM events
+  WHERE user_id = 42
+  GROUP BY event_type
+  ORDER BY cnt DESC
+`);
+
+// Join foreign table with local table
+await engine.sql(`
+  SELECT u.name, e.event_type, e.ts
+  FROM users u
+  JOIN events e ON u.id = e.user_id
+  WHERE e.event_type = 'purchase'
+  ORDER BY e.ts DESC
+  LIMIT 10
+`);
+
+// Arrow FDW for Arrow IPC data
+await engine.sql(`
+  CREATE SERVER arrow_srv FOREIGN DATA WRAPPER arrow_fdw
+`);
+
+await engine.sql(`
+  CREATE FOREIGN TABLE metrics (
+    metric TEXT, value REAL, ts TIMESTAMP
+  ) SERVER arrow_srv OPTIONS (buffer '<base64-encoded Arrow IPC>')
+`);
+
+// Clean up
+await engine.sql("DROP FOREIGN TABLE events");
+await engine.sql("DROP SERVER analytics");
+```
+
 ### Geospatial Queries
 
 ```typescript
@@ -363,6 +416,10 @@ graph TD
     Executor --> SI[Spatial Index<br/>R*Tree]
     Executor --> GS[Graph Store<br/>sql.js<br/>Named Graphs]
 
+    Compiler --> FDW[FDW Dispatch]
+    FDW --> DuckDB["DuckDB Handler<br/>@duckdb/duckdb-wasm"]
+    FDW --> Arrow["Arrow Handler<br/>apache-arrow IPC"]
+
     subgraph Scoring ["Scoring (bayesian-bm25)"]
         BM25[BM25]
         BBFS[Bayesian BM25]
@@ -406,10 +463,12 @@ src/
                   semi-join, anti-join
   execution/      Volcano iterator engine: columnar batches, vectorized operators
   planner/        Cost model, cardinality estimator, optimizer, DPccp join enumerator
+  fdw/            Foreign Data Wrapper handlers (DuckDB WASM, Apache Arrow IPC),
+                  predicate pushdown, column projection, source normalization
   sql/            SQL compiler (libpg-query WASM), expression evaluator, FTS query parser,
-                  table DDL/DML
+                  table DDL/DML, FDW dispatch
   api/            Fluent QueryBuilder
-tests/            2,832 tests across 108 test files
+tests/            2,877 tests across 110 test files
 ```
 
 ## SQL Reference
@@ -418,7 +477,7 @@ tests/            2,832 tests across 108 test files
 
 | Category | Syntax |
 |----------|--------|
-| DDL | `CREATE TABLE [IF NOT EXISTS]`, `CREATE TEMPORARY TABLE`, `DROP TABLE [IF EXISTS]`, `CREATE TABLE AS SELECT`, `ALTER TABLE` (ADD/DROP/RENAME COLUMN, SET/DROP DEFAULT, SET/DROP NOT NULL, ALTER TYPE USING), `TRUNCATE TABLE`, `CREATE INDEX`, `DROP INDEX`, `CREATE SEQUENCE`/`NEXTVAL`/`CURRVAL`/`SETVAL`, `ALTER SEQUENCE` |
+| DDL | `CREATE TABLE [IF NOT EXISTS]`, `CREATE TEMPORARY TABLE`, `DROP TABLE [IF EXISTS]`, `CREATE TABLE AS SELECT`, `ALTER TABLE` (ADD/DROP/RENAME COLUMN, SET/DROP DEFAULT, SET/DROP NOT NULL, ALTER TYPE USING), `TRUNCATE TABLE`, `CREATE INDEX`, `DROP INDEX`, `CREATE SEQUENCE`/`NEXTVAL`/`CURRVAL`/`SETVAL`, `ALTER SEQUENCE`, `CREATE SERVER ... FOREIGN DATA WRAPPER duckdb_fdw\|arrow_fdw`, `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)`, `DROP SERVER`, `DROP FOREIGN TABLE` |
 | Constraints | `PRIMARY KEY`, `NOT NULL`, `DEFAULT`, `UNIQUE`, `CHECK`, `FOREIGN KEY` (with insert/update/delete validation) |
 | DML | `INSERT INTO ... VALUES`, `INSERT INTO ... SELECT`, `INSERT ... ON CONFLICT DO NOTHING/UPDATE`, `INSERT ... RETURNING`, `UPDATE ... SET ... WHERE [RETURNING]`, `UPDATE ... FROM` (join), `DELETE FROM ... WHERE [RETURNING]`, `DELETE ... USING` (join) |
 | DQL | `SELECT [DISTINCT] ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY [NULLS FIRST/LAST] ... LIMIT ... OFFSET`, `FETCH FIRST n ROWS ONLY`, standalone `VALUES` |
@@ -702,8 +761,8 @@ import { Table } from "uqa";
 | [libpg-query](https://www.npmjs.com/package/libpg-query) | SQL parsing | PostgreSQL 17 parser compiled to WASM |
 | [bayesian-bm25](https://www.npmjs.com/package/bayesian-bm25) | BM25/Bayesian scoring and fusion | Probabilistic scoring framework |
 | [sql.js](https://www.npmjs.com/package/sql.js) | SQLite persistence | SQLite compiled to WASM |
-| [apache-arrow](https://www.npmjs.com/package/apache-arrow) | Columnar data format | Arrow IPC for execution engine batches |
-| [@duckdb/duckdb-wasm](https://www.npmjs.com/package/@duckdb/duckdb-wasm) | Foreign Data Wrapper backend | Parquet/CSV/JSON query pushdown |
+| [apache-arrow](https://www.npmjs.com/package/apache-arrow) | Arrow FDW handler | Arrow IPC foreign table scan, columnar data format |
+| [@duckdb/duckdb-wasm](https://www.npmjs.com/package/@duckdb/duckdb-wasm) | DuckDB FDW handler | Parquet/CSV/JSON foreign table scan with query pushdown |
 | [xterm](https://www.npmjs.com/package/xterm) | Terminal emulation | Browser-based SQL shell |
 | [highlight.js](https://www.npmjs.com/package/highlight.js) | Syntax highlighting | SQL syntax highlighting in shell |
 | [comlink](https://www.npmjs.com/package/comlink) | Web Worker communication | RPC for off-main-thread execution |
@@ -765,7 +824,7 @@ npx vitest run tests/test_sql.test.ts
 npm run test:watch
 ```
 
-2,832 tests across 108 test files covering:
+2,877 tests across 110 test files covering:
 
 - Boolean algebra axioms verified with 100 random trials each
 - De Morgan's laws, sorted invariants
