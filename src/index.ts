@@ -64,6 +64,9 @@ export {
 export { Engine } from "./engine.js";
 export { QueryBuilder, AggregateResult, FacetResult } from "./api/query-builder.js";
 
+// Search
+export { highlight, extractQueryTerms } from "./search/highlight.js";
+
 // SQL
 export type { SQLResult } from "./sql/compiler.js";
 export { Table } from "./sql/table.js";

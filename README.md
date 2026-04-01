@@ -128,6 +128,31 @@ const result = await engine.sql(`
   WHERE title @@ 'attention AND transformer' ORDER BY _score DESC
 `);
 
+// Highlight matched terms in search results
+const highlighted = await engine.sql(`
+  SELECT title, uqa_highlight(title, 'attention') AS snippet
+  FROM papers WHERE title @@ 'attention'
+`);
+// snippet: "...<b>attention</b> is all you need"
+
+// Highlight with custom tags and fragment extraction
+const fragments = await engine.sql(`
+  SELECT title, uqa_highlight(body, 'attention', '<em>', '</em>', 2, 100) AS snippet
+  FROM papers WHERE body @@ 'attention'
+`);
+
+// Faceted search: count values grouped by field
+const facets = await engine.sql(`
+  SELECT uqa_facets(category) FROM papers WHERE title @@ 'attention'
+`);
+// Returns: facet_value | facet_count
+
+// Multi-field facets
+const multiFacets = await engine.sql(`
+  SELECT uqa_facets(category, year) FROM papers
+`);
+// Returns: facet_field | facet_value | facet_count
+
 // K-nearest neighbor vector search
 const result = await engine.sql(`
   SELECT title, _score FROM papers
@@ -479,10 +504,11 @@ src/
   planner/        Cost model, cardinality estimator, optimizer, DPccp join enumerator
   fdw/            Foreign Data Wrapper handlers (DuckDB WASM, Apache Arrow IPC),
                   predicate pushdown, column projection, source normalization
+  search/         Search result highlighting (term markup, fragment extraction, analyzer-aware matching)
   sql/            SQL compiler (libpg-query WASM), expression evaluator, FTS query parser,
                   table DDL/DML, FDW dispatch
   api/            Fluent QueryBuilder
-tests/            2,877 tests across 110 test files
+tests/            2,912 tests across 111 test files
 ```
 
 ## SQL Reference
@@ -507,6 +533,8 @@ tests/            2,877 tests across 110 test files
 | JSON | `->`, `->>`, `#>`, `#>>` operators, `@>` / `<@` containment, `?` / `?|` / `?&` key existence, `JSONB_SET`, `JSONB_STRIP_NULLS`, `JSON_BUILD_OBJECT`, `JSON_BUILD_ARRAY`, `JSON_OBJECT_KEYS`, `JSON_EXTRACT_PATH`, `JSON_TYPEOF`, `JSON_AGG`, `::jsonb` cast |
 | Table Funcs | `GENERATE_SERIES`, `UNNEST`, `REGEXP_SPLIT_TO_TABLE`, `JSON_EACH`/`JSON_EACH_TEXT`, `JSON_ARRAY_ELEMENTS`/`JSON_ARRAY_ELEMENTS_TEXT` |
 | FTS | Requires `CREATE INDEX ... USING gin (column)`. `column @@ 'query'` full-text search operator with query string mini-language: bare terms, `"phrases"`, `field:term`, `field:[vector]`, `AND`/`OR`/`NOT`, implicit AND, parenthesized grouping, hybrid text+vector fusion |
+| Highlight | `uqa_highlight(col, 'query' [, start_tag, end_tag [, max_fragments, fragment_size]])` -- search result highlighting with analyzer-aware matching and fragment extraction |
+| Facets | `uqa_facets(col [, col2, ...])` -- facet value counts over search results; returns `facet_value \| facet_count` rows (single field) or `facet_field \| facet_value \| facet_count` (multi-field) |
 | Functions | 90+ scalar functions: string (`CONCAT_WS`, `POSITION`, `LPAD`, `REVERSE`, `MD5`, `OVERLAY`, `REGEXP_MATCH`, `ENCODE`/`DECODE`, ...), math (`POWER`, `SQRT`, `LN`, `CBRT`, `GCD`, `LCM`, `MIN_SCALE`, `TRIM_SCALE`, trig, ...), conditional (`GREATEST`, `LEAST`, `NULLIF`) |
 | Prepared | `PREPARE name AS ...`, `EXECUTE name(params)`, `DEALLOCATE name` |
 | Utility | `EXPLAIN SELECT ...`, `ANALYZE [table]` |
@@ -577,6 +605,16 @@ Used inside `deep_fusion()` to compose neural network pipelines:
 |----------|-------------|
 | `deep_learn('model', label, embedding, 'edge_label', layers...[, gating][, lambda][, l1_ratio][, prune_ratio])` | SELECT aggregate: train a CNN classifier analytically (ridge regression, no backpropagation). Optional L1 regularization and magnitude pruning. |
 | `deep_predict('model', embedding)` | Per-row scalar: inference with trained model, returns class probabilities |
+
+### Search Result Functions
+
+| Function | Description |
+|----------|-------------|
+| `uqa_highlight(col, 'query')` | Highlight matched terms with `<b>` tags |
+| `uqa_highlight(col, 'query', start_tag, end_tag)` | Highlight with custom markup tags |
+| `uqa_highlight(col, 'query', tag, tag, max_fragments, fragment_size)` | Fragment extraction with word-boundary snapping |
+| `uqa_facets(col)` | Facet counts: returns `facet_value \| facet_count` rows sorted alphabetically |
+| `uqa_facets(col1, col2, ...)` | Multi-field facets: returns `facet_field \| facet_value \| facet_count` rows |
 | `build_grid_graph('table', rows, cols, 'label')` | FROM-clause: construct 4-connected grid graph for spatial convolution |
 
 ### SELECT Spatial Functions
@@ -732,6 +770,9 @@ import {
   keywordAnalyzer,
 } from "uqa";
 
+// Search
+import { highlight, extractQueryTerms } from "uqa";
+
 // Engine and QueryBuilder
 import { Engine, QueryBuilder } from "uqa";
 
@@ -838,7 +879,7 @@ npx vitest run tests/test_sql.test.ts
 npm run test:watch
 ```
 
-2,877 tests across 110 test files covering:
+2,912 tests across 111 test files covering:
 
 - Boolean algebra axioms verified with 100 random trials each
 - De Morgan's laws, sorted invariants

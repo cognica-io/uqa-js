@@ -2774,11 +2774,24 @@ export class SQLCompiler {
     const distinctClause = nodeGet(stmt, "distinctClause");
     const windowClause = asList(nodeGet(stmt, "windowClause"));
 
+    // Resolve analyzer for uqa_highlight() support
+    let hlAnalyzer: { analyze(text: string): string[] } | null = null;
+    {
+      const tableName = this._resolveFromTableName(fromClause);
+      if (tableName) {
+        const table = this._tables.get(tableName);
+        if (table && table.invertedIndex) {
+          hlAnalyzer = (table.invertedIndex as unknown as { analyzer: { analyze(t: string): string[] } }).analyzer ?? null;
+        }
+      }
+    }
+
     const evaluator = new ExprEvaluator({
       params,
       sequences: this._sequences,
       outerRow: this._correlatedOuterRow ?? undefined,
       subqueryExecutor: this._makeSubqueryExecutor(params),
+      analyzer: hlAnalyzer,
     });
 
     // 1. FROM clause -- get source rows
@@ -2846,6 +2859,12 @@ export class SQLCompiler {
           return result === true;
         });
       }
+    }
+
+    // 2b. Intercept uqa_facets(): return facet counts over filtered rows
+    const facetResult = this._tryFacets(targetList, rows);
+    if (facetResult !== null) {
+      return facetResult;
     }
 
     // 3. GROUP BY clause
@@ -5578,6 +5597,72 @@ export class SQLCompiler {
     }
 
     return rows;
+  }
+
+  // -- Faceted search -------------------------------------------------
+
+  /**
+   * Detect uqa_facets() in SELECT and return facet rows.
+   *
+   * Returns null when the SELECT list does not contain
+   * uqa_facets(), allowing normal execution to proceed.
+   */
+  private _tryFacets(
+    targetList: Record<string, unknown>[],
+    rows: Record<string, unknown>[],
+  ): SQLResult | null {
+    if (targetList.length === 0) {
+      return null;
+    }
+
+    const facetFields: string[] = [];
+    for (const target of targetList) {
+      const resTarget = asObj(nodeGet(target, "ResTarget") ?? target);
+      const val = nodeGet(resTarget, "val");
+      if (val === null || val === undefined) continue;
+      const valObj = asObj(val);
+      const fc = nodeGet(valObj, "FuncCall");
+      if (fc === null || fc === undefined) continue;
+      const fn = getFuncName(valObj);
+      if (fn === "uqa_facets") {
+        const args = getFuncArgs(valObj);
+        for (const arg of args) {
+          facetFields.push(extractColumnName(arg));
+        }
+      }
+    }
+
+    if (facetFields.length === 0) {
+      return null;
+    }
+
+    const allRows: Record<string, unknown>[] = [];
+    const multi = facetFields.length > 1;
+    for (const fieldName of facetFields) {
+      const valueCounts = new Map<string, number>();
+      for (const row of rows) {
+        const value = row[fieldName];
+        if (value !== null && value !== undefined) {
+          const key = String(value);
+          valueCounts.set(key, (valueCounts.get(key) ?? 0) + 1);
+        }
+      }
+      const sorted = [...valueCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+      for (const [value, count] of sorted) {
+        const facetRow: Record<string, unknown> = {};
+        if (multi) {
+          facetRow["facet_field"] = fieldName;
+        }
+        facetRow["facet_value"] = value;
+        facetRow["facet_count"] = count;
+        allRows.push(facetRow);
+      }
+    }
+
+    const columns = multi
+      ? ["facet_field", "facet_value", "facet_count"]
+      : ["facet_value", "facet_count"];
+    return { columns, rows: allRows };
   }
 
   // -- DISTINCT -------------------------------------------------------

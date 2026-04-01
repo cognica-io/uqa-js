@@ -14,6 +14,7 @@
 
 import { tokenizeFts, FTSParser } from "./fts-query.js";
 import type { FTSNode } from "./fts-query.js";
+import { extractQueryTerms, highlight } from "../search/highlight.js";
 
 // -- FTS match helper -----------------------------------------------------------
 
@@ -1432,17 +1433,20 @@ export class ExprEvaluator {
   private _sequences: Map<string, { current: number; increment: number }> | null;
   private _outerRow: Record<string, unknown> | null;
   private _subqueryExecutor: SubqueryExecutor | null;
+  private _analyzer: { analyze(text: string): string[] } | null;
 
   constructor(opts?: {
     params?: unknown[];
     sequences?: Map<string, { current: number; increment: number }>;
     outerRow?: Record<string, unknown>;
     subqueryExecutor?: SubqueryExecutor;
+    analyzer?: { analyze(text: string): string[] } | null;
   }) {
     this._params = opts?.params ?? [];
     this._sequences = opts?.sequences ?? null;
     this._outerRow = opts?.outerRow ?? null;
     this._subqueryExecutor = opts?.subqueryExecutor ?? null;
+    this._analyzer = opts?.analyzer ?? null;
   }
 
   evaluate(node: Record<string, unknown>, row: Record<string, unknown>): unknown {
@@ -2344,9 +2348,56 @@ export class ExprEvaluator {
       }
     }
 
+    // uqa_highlight(field, query [, start_tag, end_tag, max_fragments, fragment_size])
+    if (funcName === "uqa_highlight") {
+      return this._evalUqaHighlight(argNodes, row);
+    }
+
     const evaluatedArgs = argNodes.map((arg) => this.evaluate(arg, row));
 
     return callScalarFunction(funcName, evaluatedArgs);
+  }
+
+  private _evalUqaHighlight(
+    argNodes: Record<string, unknown>[],
+    row: Record<string, unknown>,
+  ): unknown {
+    if (argNodes.length < 2) {
+      throw new Error("uqa_highlight() requires at least 2 arguments: field, query");
+    }
+
+    const text = this.evaluate(argNodes[0]!, row);
+    const queryString = this.evaluate(argNodes[1]!, row);
+    const startTag = argNodes.length > 2
+      ? String(this.evaluate(argNodes[2]!, row))
+      : "<b>";
+    const endTag = argNodes.length > 3
+      ? String(this.evaluate(argNodes[3]!, row))
+      : "</b>";
+    const maxFragments = argNodes.length > 4
+      ? Number(this.evaluate(argNodes[4]!, row))
+      : 0;
+    const fragmentSize = argNodes.length > 5
+      ? Number(this.evaluate(argNodes[5]!, row))
+      : 150;
+
+    if (text === null || text === undefined) {
+      return null;
+    }
+
+    const textStr = String(text);
+    const queryTerms = extractQueryTerms(String(queryString));
+    if (queryTerms.length === 0) {
+      return textStr;
+    }
+
+    return highlight(textStr, queryTerms, {
+      startTag,
+      endTag,
+      maxFragments,
+      fragmentSize,
+      analyzer: this._analyzer,
+    });
   }
 
   // -- NullTest -----------------------------------------------------------------

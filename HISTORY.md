@@ -1,5 +1,27 @@
 # History
 
+## 0.2.0 (2026-04-01)
+
+SQL faceted search and search result highlighting.
+
+### Features
+- **Search result highlighting (`uqa_highlight()`)**: New SQL scalar function that highlights matched query terms in text fields. Supports custom markup tags, analyzer-aware stemming match, and fragment extraction with word-boundary snapping.
+  - `uqa_highlight(field, 'query')` -- highlight with default `<b>` tags
+  - `uqa_highlight(field, 'query', '<em>', '</em>')` -- custom tags
+  - `uqa_highlight(field, 'query', '<b>', '</b>', max_fragments, fragment_size)` -- snippet extraction
+  - Analyzer-aware matching: uses the table's GIN index analyzer for stemming-consistent highlighting (e.g., searching for "run" highlights "running")
+  - Fragment extraction clusters nearby matches, selects densest clusters, and snaps to word boundaries with ellipsis markers
+- **Faceted search (`uqa_facets()`)**: New SQL function that computes facet value counts over search results.
+  - `SELECT uqa_facets(field) FROM table` -- returns `facet_value | facet_count` rows
+  - `SELECT uqa_facets(field1, field2) FROM table` -- multi-field facets with `facet_field | facet_value | facet_count`
+  - Respects WHERE clause filtering (including `@@` and `text_match` predicates)
+  - Results sorted alphabetically by facet value
+- **Search highlighting module** (`src/search/highlight.ts`): Standalone `highlight()` and `extractQueryTerms()` utilities exported from the public API for programmatic use outside SQL.
+
+### Tests
+- 2,912 tests across 111 test files
+- Added 35 tests in `tests/sql/facets-highlight.test.ts` covering highlight utility, query term extraction, SQL `uqa_highlight()`, and SQL `uqa_facets()`
+
 ## 0.1.5 (2026-03-29)
 
 Foreign Data Wrapper integration with the SQL execution engine.
