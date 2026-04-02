@@ -237,7 +237,7 @@ export class Catalog {
 
   saveTableSchema(name: string, columns: Record<string, unknown>[]): void {
     this._conn.execute(
-      `INSERT INTO _catalog_tables (name, columns_json) VALUES (?, ?)`,
+      `INSERT OR REPLACE INTO _catalog_tables (name, columns_json) VALUES (?, ?)`,
       [name, JSON.stringify(columns)],
     );
     this._autoCommit();

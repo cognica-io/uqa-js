@@ -89,7 +89,14 @@ import { Engine } from "uqa";
 const engine = await Engine.create();
 
 // Persistent engine (SQLite via sql.js WASM)
+// Opens existing database or creates a new one.
+// Restores all tables, documents, sequences, named graphs, and models.
 const engine = await Engine.create({ dbPath: "research.db" });
+
+// ... use the engine ...
+
+// Close flushes all state to disk and releases resources.
+engine.close();
 ```
 
 ### SQL Queries
@@ -680,7 +687,7 @@ Used inside `deep_fusion()` to compose neural network pipelines:
 
 ### Persistence
 
-All data is persisted to SQLite (via sql.js WASM) when an engine is created with `dbPath`:
+All data is persisted to SQLite (via sql.js WASM) when an engine is created with `dbPath`. The full lifecycle is: `Engine.create({ dbPath })` opens (or creates) the database file and restores all tables, documents, sequences, named graphs, and trained models. `engine.close()` saves current state and flushes the database to disk.
 
 | Store | SQLite Table | Description |
 |-------|-------------|-------------|
@@ -810,12 +817,12 @@ import { Table } from "uqa";
 
 | Method | Description |
 |--------|-------------|
-| `Engine.create(options?)` | Create an engine instance (async, initializes WASM) |
+| `Engine.create(options?)` | Create an engine instance (async, initializes WASM). When `dbPath` is provided, opens the SQLite database and restores persisted tables, documents, sequences, and models |
 | `engine.sql(query, params?)` | Execute a SQL query |
 | `engine.query(options)` | Create a QueryBuilder for fluent queries |
 | `engine.begin()` | Start a transaction (returns `Transaction` or `InMemoryTransaction`) |
 | `engine.getDocument(id, table)` | Retrieve a document by ID |
-| `engine.close()` | Close the engine and release resources |
+| `engine.close()` | Persist all state to the catalog, flush SQLite database to disk (when `dbPath` is set), and release resources |
 
 ### QueryBuilder
 

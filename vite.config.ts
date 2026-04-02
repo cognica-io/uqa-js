@@ -11,6 +11,8 @@ export default defineConfig({
     sourcemap: true,
     rollupOptions: {
       external: [
+        "fs",
+        "node:fs",
         "bayesian-bm25",
         "libpg-query",
         "sql.js",

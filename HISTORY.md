@@ -1,5 +1,21 @@
 # History
 
+## 0.3.1 (2026-04-02)
+
+SQLite persistence lifecycle: save, load, and restore engine state from disk.
+
+### Features
+- **Async engine initialization (`init()`)**: New `Engine.init()` method handles sql.js WASM initialization, opens or creates the SQLite database file, and restores persisted state. Called automatically by `Engine.create()` when `dbPath` is provided. Idempotent -- safe to call multiple times.
+- **Full catalog restore on load**: `loadFromCatalog()` now reconstructs complete `Table` objects with column definitions, documents, sequences, named graphs, and trained models from the SQLite catalog. Previously loaded schemas were discarded (`void name`) and tables were not reconstructed.
+- **Document persistence**: `saveToCatalog()` now persists all documents for each non-temporary table alongside the table schema. Previously only schemas were saved.
+- **Sequence persistence**: Sequences (`SERIAL` / `NEXTVAL`) are saved to and restored from catalog metadata, preserving auto-increment state across engine restarts.
+- **Model persistence**: Trained deep learning models are restored from the `_models` catalog table on load.
+- **Disk flush on close**: `Engine.close()` now calls `saveToCatalog()` and writes the in-memory SQLite database to disk via `fs.writeFileSync()` before releasing resources. Previously the in-memory database was discarded on close.
+
+### Fixes
+- **Idempotent schema save**: `Catalog.saveTableSchema()` uses `INSERT OR REPLACE` instead of `INSERT`, preventing unique constraint violations when saving the same table schema multiple times.
+- **Rollup externals**: Added `fs` and `node:fs` to Vite rollup externals so the Node.js `fs` module is not bundled into browser builds.
+
 ## 0.3.0 (2026-04-02)
 
 PostgreSQL compatibility: schemas, sessions, transactions, DDL, query fixes.

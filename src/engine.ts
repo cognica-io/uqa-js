@@ -14,12 +14,13 @@
 
 import { SQLCompiler } from "./sql/compiler.js";
 import type { SQLResult } from "./sql/compiler.js";
-import type { Table } from "./sql/table.js";
+import { Table, createColumnDef } from "./sql/table.js";
+import type { ColumnDef } from "./sql/table.js";
 import { MemoryGraphStore } from "./graph/store.js";
 import type { GraphStore } from "./storage/abc/graph-store.js";
 import { QueryBuilder } from "./api/query-builder.js";
-import type { Catalog } from "./storage/catalog.js";
-import type { IndexManager } from "./storage/index-manager.js";
+import { Catalog } from "./storage/catalog.js";
+import { IndexManager } from "./storage/index-manager.js";
 import {
   Transaction as TransactionClass,
   InMemoryTransaction,
@@ -45,7 +46,8 @@ import {
 } from "./scoring/bayesian-bm25.js";
 import { ParameterLearner } from "./scoring/parameter-learner.js";
 import { estimateConvWeights as estimateConvWeightsFn } from "./operators/deep-fusion.js";
-import type { ManagedConnection } from "./storage/managed-connection.js";
+import { ManagedConnection } from "./storage/managed-connection.js";
+import type { SQLiteDatabase } from "./storage/managed-connection.js";
 
 // -- SchemaAwareTableStore ---------------------------------------------------
 
@@ -270,6 +272,9 @@ export class Engine {
   _btreeIndexes: Map<string, [string, string[]]>;
   // Session variables (SET/SHOW/RESET)
   _sessionVars: Map<string, string>;
+  private _conn: ManagedConnection | null;
+  // Node.js fs module, resolved during init() for use in close()
+  private _fs: typeof import("fs") | null;
   private _catalog: Catalog | null;
   private _indexManager: IndexManager | null;
   private _transaction: Transaction | InMemoryTransaction | null;
@@ -295,10 +300,56 @@ export class Engine {
     this._models = new Map();
     this._btreeIndexes = new Map();
     this._sessionVars = new Map();
+    this._conn = null;
+    this._fs = null;
     this._catalog = null;
     this._indexManager = null;
     this._transaction = null;
     this._compiler = new SQLCompiler(this);
+  }
+
+  /**
+   * Async initialization -- must be called after construction when dbPath is
+   * provided.  Creates the sql.js SQLite connection, opens (or creates) the
+   * catalog database, and restores persisted tables, documents, sequences,
+   * and named graphs.
+   *
+   * When no dbPath was supplied the method is a no-op so callers may always
+   * await `engine.init()` unconditionally.
+   */
+  async init(): Promise<void> {
+    if (this._dbPath === null) return;
+    if (this._conn !== null) return;
+
+    const initSqlJs = (await import("sql.js")).default;
+    const SQL = await initSqlJs();
+
+    // Resolve the fs module for later use in the synchronous close() path.
+    // In browser environments this import will fail; file persistence is
+    // unavailable there.
+    try {
+      this._fs = await import("fs");
+    } catch {
+      this._fs = null;
+    }
+
+    let db: SQLiteDatabase;
+    if (this._fs !== null) {
+      try {
+        const data = this._fs.readFileSync(this._dbPath);
+        db = new SQL.Database(new Uint8Array(data));
+      } catch {
+        // File does not exist yet -- start with a fresh database.
+        db = new SQL.Database();
+      }
+    } else {
+      db = new SQL.Database();
+    }
+
+    this._conn = new ManagedConnection(db, this._dbPath);
+    this._catalog = new Catalog(this._conn);
+    this._indexManager = new IndexManager(this._conn, this._catalog);
+    this._loadFromCatalog();
   }
 
   // -- SQL execution ----------------------------------------------------------
@@ -1057,14 +1108,19 @@ export class Engine {
   saveToCatalog(): void {
     if (this._catalog === null) return;
 
-    // Save all table schemas
+    // Save all table schemas and their documents
     for (const [name, table] of this._tables) {
-      if (!this._tempTables.has(name)) {
-        const columnDefs: Record<string, unknown>[] = [];
-        for (const [colName, col] of table.columns) {
-          columnDefs.push({ ...col, name: colName });
-        }
-        this._catalog.saveTableSchema(name, columnDefs);
+      if (this._tempTables.has(name)) continue;
+
+      const columnDefs: Record<string, unknown>[] = [];
+      for (const [colName, col] of table.columns) {
+        columnDefs.push({ ...col, name: colName });
+      }
+      this._catalog.saveTableSchema(name, columnDefs);
+
+      // Persist all documents for this table
+      for (const [docId, doc] of table.documentStore.iterAll()) {
+        this._catalog.saveDocument(name, docId as number, doc);
       }
     }
 
@@ -1089,13 +1145,55 @@ export class Engine {
    * Called during initialization when a catalog is available.
    */
   loadFromCatalog(): void {
+    this._loadFromCatalog();
+  }
+
+  private _loadFromCatalog(): void {
     if (this._catalog === null) return;
 
-    // Load table schemas
+    // Load table schemas and reconstruct Table objects with their documents
     const schemas = this._catalog.loadTableSchemas();
-    for (const [name] of schemas) {
-      // Table reconstruction happens via the compiler's DDL replay
-      void name;
+    for (const [name, colDicts] of schemas) {
+      const columns: ColumnDef[] = colDicts.map((cd) =>
+        createColumnDef(cd["name"] as string, cd["typeName"] as string, {
+          pythonType: (cd["pythonType"] as string) ?? "string",
+          primaryKey: (cd["primaryKey"] as boolean) ?? false,
+          notNull: (cd["notNull"] as boolean) ?? false,
+          autoIncrement: (cd["autoIncrement"] as boolean) ?? false,
+          defaultValue: cd["defaultValue"] ?? null,
+          vectorDimensions: (cd["vectorDimensions"] as number | null) ?? null,
+          unique: (cd["unique"] as boolean) ?? false,
+          numericPrecision: (cd["numericPrecision"] as number | null) ?? null,
+          numericScale: (cd["numericScale"] as number | null) ?? null,
+        }),
+      );
+      const table = new Table(name, columns);
+
+      // Load persisted documents into the table
+      const docs = this._catalog.loadDocuments(name);
+      for (const [docId, data] of docs) {
+        table.documentStore.put(docId, data);
+        if (docId >= table._nextDocId) {
+          table._nextDocId = docId + 1;
+        }
+      }
+
+      this._tables.set(name, table);
+      // Register in the compiler so SQL queries can find the table
+      this._compiler.tables.set(name, table);
+    }
+
+    // Load sequences from metadata
+    const allMeta = this._catalog.conn.query(
+      `SELECT key, value FROM _metadata WHERE key LIKE 'seq:%'`,
+    );
+    for (const row of allMeta) {
+      const seqName = (row["key"] as string).substring(4); // strip "seq:"
+      const seqData = JSON.parse(row["value"] as string) as Record<
+        string,
+        number
+      >;
+      this._sequences.set(seqName, seqData);
     }
 
     // Load named graphs
@@ -1104,6 +1202,19 @@ export class Engine {
       if (!this._graphStore.hasGraph(name)) {
         this._graphStore.createGraph(name);
       }
+    }
+
+    // Load models
+    const modelRows = this._catalog.conn.query(
+      `SELECT model_name, config_json FROM _models`,
+    );
+    for (const row of modelRows) {
+      const modelName = row["model_name"] as string;
+      const config = JSON.parse(row["config_json"] as string) as Record<
+        string,
+        unknown
+      >;
+      this._models.set(modelName, config);
     }
   }
 
@@ -1127,10 +1238,23 @@ export class Engine {
     }
     this._tempTables.clear();
 
-    // Close catalog
+    // Persist state to the catalog before closing
+    this.saveToCatalog();
+
+    // Close catalog (flushes WAL)
     if (this._catalog !== null) {
       this._catalog.close();
       this._catalog = null;
+    }
+
+    // Write the SQLite database to disk if a file path was provided
+    if (this._conn !== null && this._dbPath !== null) {
+      if (this._fs !== null) {
+        const data = this._conn.exportDatabase();
+        this._fs.writeFileSync(this._dbPath, data);
+      }
+      this._conn.close();
+      this._conn = null;
     }
 
     this._tables.clear();
