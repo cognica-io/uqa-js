@@ -119,6 +119,31 @@ export class IndexStats {
 
 // -- Predicate system --------------------------------------------------------
 
+/**
+ * Coerce mismatched date/string types for comparison.
+ *
+ * When one side is a Date object and the other is a string,
+ * parse the string to match so comparisons work correctly.
+ */
+function _coerceForComparison(value: unknown, target: unknown): [unknown, unknown] {
+  if (value instanceof Date && typeof target === "string") {
+    try {
+      const parsed = new Date(target);
+      if (!isNaN(parsed.getTime())) return [value, parsed];
+    } catch {
+      // fall through
+    }
+  } else if (target instanceof Date && typeof value === "string") {
+    try {
+      const parsed = new Date(value);
+      if (!isNaN(parsed.getTime())) return [parsed, target];
+    } catch {
+      // fall through
+    }
+  }
+  return [value, target];
+}
+
 export abstract class Predicate {
   abstract evaluate(value: unknown): boolean;
 }
@@ -128,7 +153,9 @@ export class Equals extends Predicate {
     super();
   }
   evaluate(value: unknown): boolean {
-    return value === this.target;
+    const [v, t] = _coerceForComparison(value, this.target);
+    if (v instanceof Date && t instanceof Date) return v.getTime() === t.getTime();
+    return v === t;
   }
 }
 
@@ -137,7 +164,9 @@ export class NotEquals extends Predicate {
     super();
   }
   evaluate(value: unknown): boolean {
-    return value !== this.target;
+    const [v, t] = _coerceForComparison(value, this.target);
+    if (v instanceof Date && t instanceof Date) return v.getTime() !== t.getTime();
+    return v !== t;
   }
 }
 
@@ -146,7 +175,9 @@ export class GreaterThan extends Predicate {
     super();
   }
   evaluate(value: unknown): boolean {
-    return (value as number) > this.target;
+    const [v, t] = _coerceForComparison(value, this.target);
+    if (v instanceof Date && t instanceof Date) return v.getTime() > t.getTime();
+    return (v as number) > (t as number);
   }
 }
 
@@ -155,7 +186,9 @@ export class GreaterThanOrEqual extends Predicate {
     super();
   }
   evaluate(value: unknown): boolean {
-    return (value as number) >= this.target;
+    const [v, t] = _coerceForComparison(value, this.target);
+    if (v instanceof Date && t instanceof Date) return v.getTime() >= t.getTime();
+    return (v as number) >= (t as number);
   }
 }
 
@@ -164,7 +197,9 @@ export class LessThan extends Predicate {
     super();
   }
   evaluate(value: unknown): boolean {
-    return (value as number) < this.target;
+    const [v, t] = _coerceForComparison(value, this.target);
+    if (v instanceof Date && t instanceof Date) return v.getTime() < t.getTime();
+    return (v as number) < (t as number);
   }
 }
 
@@ -173,7 +208,9 @@ export class LessThanOrEqual extends Predicate {
     super();
   }
   evaluate(value: unknown): boolean {
-    return (value as number) <= this.target;
+    const [v, t] = _coerceForComparison(value, this.target);
+    if (v instanceof Date && t instanceof Date) return v.getTime() <= t.getTime();
+    return (v as number) <= (t as number);
   }
 }
 

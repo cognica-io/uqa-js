@@ -61,7 +61,7 @@ export {
 } from "./operators/boolean.js";
 
 // Engine
-export { Engine } from "./engine.js";
+export { Engine, SchemaAwareTableStore } from "./engine.js";
 export { QueryBuilder, AggregateResult, FacetResult } from "./api/query-builder.js";
 
 // Search

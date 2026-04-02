@@ -30,9 +30,11 @@ describe("DateTimeTypes", () => {
     await e.sql("INSERT INTO events (id, event_date) VALUES (1, '2024-01-01')");
     await e.sql("INSERT INTO events (id, event_date) VALUES (2, '2024-06-15')");
     await e.sql("INSERT INTO events (id, event_date) VALUES (3, '2024-12-31')");
-    const result = await e.sql("SELECT id FROM events WHERE event_date > '2024-03-01'");
-    const ids = new Set(result!.rows.map((r) => r["id"]));
-    expect(ids).toEqual(new Set([2, 3]));
+    const result = await e.sql(
+      "SELECT id FROM events WHERE event_date > '2024-03-01' ORDER BY id",
+    );
+    const ids = result!.rows.map((r) => r["id"]);
+    expect(ids).toEqual([2, 3]);
   });
 
   it("date ordering", async () => {
@@ -57,22 +59,25 @@ describe("DateTimeFunctions", () => {
   it("now", async () => {
     const e = new Engine();
     const result = await e.sql("SELECT NOW() AS ts");
-    const ts = result!.rows[0]!["ts"] as string;
-    expect(ts).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    const ts = result!.rows[0]!["ts"];
+    expect(ts).toBeInstanceOf(Date);
   });
 
   it("current date", async () => {
     const e = new Engine();
     const result = await e.sql("SELECT CURRENT_DATE AS d");
-    const d = result!.rows[0]!["d"] as string;
-    expect(d).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const d = result!.rows[0]!["d"];
+    expect(d).toBeInstanceOf(Date);
+    // Date-only: hours/minutes/seconds should be 0
+    expect((d as Date).getHours()).toBe(0);
+    expect((d as Date).getMinutes()).toBe(0);
   });
 
   it("current timestamp", async () => {
     const e = new Engine();
     const result = await e.sql("SELECT CURRENT_TIMESTAMP AS ts");
-    const ts = result!.rows[0]!["ts"] as string;
-    expect(ts).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    const ts = result!.rows[0]!["ts"];
+    expect(ts).toBeInstanceOf(Date);
   });
 });
 
@@ -134,21 +139,32 @@ describe("ExtractDatePartDateTrunc", () => {
   it("date trunc year", async () => {
     const e = await makeTSEngine();
     const result = await e.sql("SELECT DATE_TRUNC('year', ts) AS t FROM log");
-    expect((result!.rows[0]!["t"] as string).startsWith("2024-01-01")).toBe(true);
+    const t = result!.rows[0]!["t"] as Date;
+    expect(t).toBeInstanceOf(Date);
+    expect(t.getFullYear()).toBe(2024);
+    expect(t.getMonth()).toBe(0); // January
+    expect(t.getDate()).toBe(1);
   });
 
   it("date trunc month", async () => {
     const e = await makeTSEngine();
     const result = await e.sql("SELECT DATE_TRUNC('month', ts) AS t FROM log");
-    expect((result!.rows[0]!["t"] as string).startsWith("2024-06-01")).toBe(true);
+    const t = result!.rows[0]!["t"] as Date;
+    expect(t).toBeInstanceOf(Date);
+    expect(t.getFullYear()).toBe(2024);
+    expect(t.getMonth()).toBe(5); // June
+    expect(t.getDate()).toBe(1);
   });
 
   it("date trunc day", async () => {
     const e = await makeTSEngine();
     const result = await e.sql("SELECT DATE_TRUNC('day', ts) AS t FROM log");
-    expect((result!.rows[0]!["t"] as string).startsWith("2024-06-15T00:00:00")).toBe(
-      true,
-    );
+    const t = result!.rows[0]!["t"] as Date;
+    expect(t).toBeInstanceOf(Date);
+    expect(t.getFullYear()).toBe(2024);
+    expect(t.getMonth()).toBe(5);
+    expect(t.getDate()).toBe(15);
+    expect(t.getHours()).toBe(0);
   });
 
   it("extract quarter", async () => {
@@ -175,33 +191,44 @@ describe("MakeTimestamp", () => {
   it("basic", async () => {
     const e = new Engine();
     const r = await e.sql("SELECT make_timestamp(2024, 3, 15, 10, 30, 0) AS ts");
-    const ts = r!.rows[0]!["ts"] as string;
-    expect(ts).toContain("2024-03-15");
-    expect(ts).toContain("10:30:00");
+    const ts = r!.rows[0]!["ts"] as Date;
+    expect(ts).toBeInstanceOf(Date);
+    expect(ts.getFullYear()).toBe(2024);
+    expect(ts.getMonth()).toBe(2); // March
+    expect(ts.getDate()).toBe(15);
+    expect(ts.getHours()).toBe(10);
+    expect(ts.getMinutes()).toBe(30);
   });
 
   it("with fractional seconds", async () => {
     const e = new Engine();
     const r = await e.sql("SELECT make_timestamp(2024, 1, 1, 0, 0, 30.5) AS ts");
-    const ts = r!.rows[0]!["ts"] as string;
-    expect(ts).toContain("2024-01-01");
-    expect(ts).toContain("00:00:30");
+    const ts = r!.rows[0]!["ts"] as Date;
+    expect(ts).toBeInstanceOf(Date);
+    expect(ts.getFullYear()).toBe(2024);
+    expect(ts.getSeconds()).toBe(30);
   });
 
   it("midnight", async () => {
     const e = new Engine();
     const r = await e.sql("SELECT make_timestamp(2024, 12, 31, 0, 0, 0) AS ts");
-    const ts = r!.rows[0]!["ts"] as string;
-    expect(ts).toContain("2024-12-31");
-    expect(ts).toContain("00:00:00");
+    const ts = r!.rows[0]!["ts"] as Date;
+    expect(ts).toBeInstanceOf(Date);
+    expect(ts.getFullYear()).toBe(2024);
+    expect(ts.getMonth()).toBe(11); // December
+    expect(ts.getDate()).toBe(31);
+    expect(ts.getHours()).toBe(0);
   });
 
   it("end of day", async () => {
     const e = new Engine();
     const r = await e.sql("SELECT make_timestamp(2024, 6, 15, 23, 59, 59) AS ts");
-    const ts = r!.rows[0]!["ts"] as string;
-    expect(ts).toContain("2024-06-15");
-    expect(ts).toContain("23:59:59");
+    const ts = r!.rows[0]!["ts"] as Date;
+    expect(ts).toBeInstanceOf(Date);
+    expect(ts.getFullYear()).toBe(2024);
+    expect(ts.getHours()).toBe(23);
+    expect(ts.getMinutes()).toBe(59);
+    expect(ts.getSeconds()).toBe(59);
   });
 });
 

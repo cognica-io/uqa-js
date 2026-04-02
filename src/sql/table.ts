@@ -198,6 +198,48 @@ function coerceNumeric(value: unknown, scale: number): number {
   return Math.round(num * factor) / factor;
 }
 
+const _DATETIME_TYPES = new Set([
+  "date",
+  "time",
+  "timetz",
+  "time without time zone",
+  "time with time zone",
+  "timestamp",
+  "timestamptz",
+  "timestamp without time zone",
+  "timestamp with time zone",
+]);
+
+function _coerceDatetime(value: unknown, _typeName: string): Date | unknown {
+  if (value instanceof Date) return value;
+  const s = String(value);
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) return parsed;
+  return value;
+}
+
+/**
+ * Evaluate a column DEFAULT value.
+ *
+ * Literal defaults (number, string, etc.) are returned as-is.
+ * AST nodes (SQLValueFunction, FuncCall) are evaluated via
+ * ExprEvaluator to support DEFAULT CURRENT_TIMESTAMP and similar.
+ */
+function _evaluateDefault(defaultVal: unknown): unknown {
+  if (defaultVal !== null && defaultVal !== undefined && typeof defaultVal === "object") {
+    const obj = defaultVal as Record<string, unknown>;
+    // Check if this is a deferred AST node (has nodeTag or similar marker)
+    if (obj._astDefault === true) {
+      // Evaluate the AST node at insert time
+      const fn = obj._evalFn as (() => unknown) | undefined;
+      if (fn) return fn();
+    }
+  }
+  return defaultVal;
+}
+
+const _AUTO_INCREMENT_TYPES = new Set(["serial", "bigserial", "smallserial"]);
+
 // -- Table ----------------------------------------------------------------------
 
 const HISTOGRAM_BUCKETS = 100;
@@ -318,18 +360,23 @@ export class Table {
       this._nextDocId++;
     }
 
+    // -- DEFAULT value application --
+    for (const [colName, colDef] of this.columns) {
+      if (colDef.defaultValue !== null && colDef.defaultValue !== undefined) {
+        if (row[colName] === null || row[colName] === undefined) {
+          row[colName] = _evaluateDefault(colDef.defaultValue);
+        }
+      }
+    }
+
     // -- NOT NULL validation --
     for (const [colName, colDef] of this.columns) {
       if (colDef.notNull && !colDef.autoIncrement) {
         const value = row[colName];
         if (value === null || value === undefined) {
-          if (colDef.defaultValue !== null && colDef.defaultValue !== undefined) {
-            row[colName] = colDef.defaultValue;
-          } else {
-            throw new Error(
-              `NOT NULL constraint violated: column '${colName}' in table '${this.name}'`,
-            );
-          }
+          throw new Error(
+            `NOT NULL constraint violated: column '${colName}' in table '${this.name}'`,
+          );
         }
       }
     }
@@ -407,6 +454,8 @@ export class Table {
           coerced[colName] = coerceArray(rawValue);
         } else if (colDef.typeName === "bytea") {
           coerced[colName] = coerceBytea(rawValue);
+        } else if (_DATETIME_TYPES.has(colDef.typeName)) {
+          coerced[colName] = _coerceDatetime(rawValue, colDef.typeName);
         } else if (colDef.numericScale !== null) {
           coerced[colName] = coerceNumeric(rawValue, colDef.numericScale);
         } else if (colDef.pythonType === "number") {
@@ -419,7 +468,7 @@ export class Table {
           coerced[colName] = rawValue;
         }
       } else if (colDef.defaultValue !== null && colDef.defaultValue !== undefined) {
-        coerced[colName] = colDef.defaultValue;
+        coerced[colName] = _evaluateDefault(colDef.defaultValue);
       }
       // else: column absent -> not stored (sparse document)
     }

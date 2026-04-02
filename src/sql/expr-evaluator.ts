@@ -699,7 +699,7 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
     case "date_trunc": {
       if (args[0] === null || args[1] === null) return null;
       const precision = toStr(args[0]).toLowerCase();
-      const d = parseLocalDate(toStr(args[1]));
+      const d = args[1] instanceof Date ? new Date(args[1].getTime()) : parseLocalDate(toStr(args[1]));
       if (precision === "year") {
         d.setFullYear(d.getFullYear(), 0, 1);
         d.setHours(0, 0, 0, 0);
@@ -710,11 +710,11 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
       else if (precision === "hour") d.setMinutes(0, 0, 0);
       else if (precision === "minute") d.setSeconds(0, 0);
       else if (precision === "second") d.setMilliseconds(0);
-      return localISOString(d);
+      return d;
     }
     case "make_timestamp": {
       if (args.length < 6 || args.some((a) => a === null)) return null;
-      const dt = new Date(
+      return new Date(
         Number(args[0]),
         Number(args[1]) - 1,
         Number(args[2]),
@@ -722,7 +722,6 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
         Number(args[4]),
         Math.trunc(Number(args[5])),
       );
-      return localISOString(dt);
     }
     case "make_interval": {
       const years = args.length > 0 && args[0] != null ? Number(args[0]) : 0;
@@ -745,13 +744,10 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
     }
     case "make_date": {
       if (args.length < 3 || args.some((a) => a === null)) return null;
-      const yyyy = String(Number(args[0])).padStart(4, "0");
-      const mm = String(Number(args[1])).padStart(2, "0");
-      const dd = String(Number(args[2])).padStart(2, "0");
-      return `${yyyy}-${mm}-${dd}`;
+      return new Date(Number(args[0]), Number(args[1]) - 1, Number(args[2]));
     }
     case "clock_timestamp":
-      return new Date().toISOString();
+      return new Date();
     case "timeofday": {
       const now = new Date();
       return now.toUTCString();
@@ -970,15 +966,21 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
     }
 
     // Date/time functions
-    case "current_date":
+    case "current_date": {
+      const now = new Date();
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    }
     case "current_timestamp":
-    case "now":
-      return new Date().toISOString();
+    case "now": {
+      const now = new Date();
+      now.setMilliseconds(0);
+      return now;
+    }
     case "date_part":
     case "extract": {
       if (args[0] === null || args[1] === null) return null;
       const part = toStr(args[0]).toLowerCase();
-      const d = parseLocalDate(toStr(args[1]));
+      const d = args[1] instanceof Date ? args[1] : parseLocalDate(toStr(args[1]));
       switch (part) {
         case "year":
           return d.getFullYear();
@@ -1036,28 +1038,28 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
       if (args.length < 3 || args.some((a) => a === null)) return null;
       const unit = toStr(args[0]).toLowerCase();
       const amount = Number(args[1]);
-      const d = new Date(toStr(args[2]));
+      const d = args[2] instanceof Date ? new Date(args[2].getTime()) : new Date(toStr(args[2]));
       if (unit === "year") d.setFullYear(d.getFullYear() + amount);
       else if (unit === "month") d.setMonth(d.getMonth() + amount);
       else if (unit === "day") d.setDate(d.getDate() + amount);
       else if (unit === "hour") d.setHours(d.getHours() + amount);
       else if (unit === "minute") d.setMinutes(d.getMinutes() + amount);
       else if (unit === "second") d.setSeconds(d.getSeconds() + amount);
-      return d.toISOString();
+      return d;
     }
     case "date_subtract":
     case "datesub": {
       if (args.length < 3 || args.some((a) => a === null)) return null;
       const unit = toStr(args[0]).toLowerCase();
       const amount = Number(args[1]);
-      const d = new Date(toStr(args[2]));
+      const d = args[2] instanceof Date ? new Date(args[2].getTime()) : new Date(toStr(args[2]));
       if (unit === "year") d.setFullYear(d.getFullYear() - amount);
       else if (unit === "month") d.setMonth(d.getMonth() - amount);
       else if (unit === "day") d.setDate(d.getDate() - amount);
       else if (unit === "hour") d.setHours(d.getHours() - amount);
       else if (unit === "minute") d.setMinutes(d.getMinutes() - amount);
       else if (unit === "second") d.setSeconds(d.getSeconds() - amount);
-      return d.toISOString();
+      return d;
     }
     case "date_diff":
     case "datediff": {
@@ -1092,8 +1094,11 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
       return args[0];
     }
     case "statement_timestamp":
-    case "transaction_timestamp":
-      return new Date().toISOString();
+    case "transaction_timestamp": {
+      const now = new Date();
+      now.setMilliseconds(0);
+      return now;
+    }
 
     // Type cast helpers
     case "to_char": {
@@ -1137,10 +1142,15 @@ function callScalarFunction(name: string, args: unknown[]): unknown {
       const cleaned = toStr(args[0]).replace(/[^0-9eE.+-]/g, "");
       return Number(cleaned);
     }
-    case "to_date":
-    case "to_timestamp":
+    case "to_date": {
       if (args[0] === null) return null;
-      return new Date(toStr(args[0])).toISOString();
+      const parsed = new Date(toStr(args[0]));
+      return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+    }
+    case "to_timestamp": {
+      if (args[0] === null) return null;
+      return new Date(toStr(args[0]));
+    }
 
     // Array functions
     case "array_length":
@@ -1883,30 +1893,41 @@ export class ExprEvaluator {
       return Math.pow(left as number, right as number);
     }
 
-    // Comparison
-    if (op === "=") {
+    // Comparison -- coerce date/string mismatches
+    if (
+      op === "=" || op === "<>" || op === "!=" ||
+      op === "<" || op === ">" || op === "<=" || op === ">="
+    ) {
       if (left === null || right === null) return null;
-      return left === right;
-    }
-    if (op === "<>" || op === "!=") {
-      if (left === null || right === null) return null;
-      return left !== right;
-    }
-    if (op === "<") {
-      if (left === null || right === null) return null;
-      return (left as number) < (right as number);
-    }
-    if (op === ">") {
-      if (left === null || right === null) return null;
-      return (left as number) > (right as number);
-    }
-    if (op === "<=") {
-      if (left === null || right === null) return null;
-      return (left as number) <= (right as number);
-    }
-    if (op === ">=") {
-      if (left === null || right === null) return null;
-      return (left as number) >= (right as number);
+      let l = left;
+      let r = right;
+      if (l instanceof Date && typeof r === "string") {
+        const parsed = new Date(r);
+        if (!isNaN(parsed.getTime())) r = parsed;
+      } else if (r instanceof Date && typeof l === "string") {
+        const parsed = new Date(l);
+        if (!isNaN(parsed.getTime())) l = parsed;
+      }
+      if (l instanceof Date && r instanceof Date) {
+        const lt = l.getTime();
+        const rt = r.getTime();
+        switch (op) {
+          case "=": return lt === rt;
+          case "<>": case "!=": return lt !== rt;
+          case "<": return lt < rt;
+          case "<=": return lt <= rt;
+          case ">": return lt > rt;
+          case ">=": return lt >= rt;
+        }
+      }
+      switch (op) {
+        case "=": return l === r;
+        case "<>": case "!=": return l !== r;
+        case "<": return (l as number) < (r as number);
+        case ">": return (l as number) > (r as number);
+        case "<=": return (l as number) <= (r as number);
+        case ">=": return (l as number) >= (r as number);
+      }
     }
 
     // String operators
@@ -2424,30 +2445,28 @@ export class ExprEvaluator {
     const opStr = typeof op === "string" ? op : "";
     if (opStr === "SVFOP_CURRENT_DATE") {
       const now = new Date();
-      const y = String(now.getFullYear());
-      const m = String(now.getMonth() + 1).padStart(2, "0");
-      const d = String(now.getDate()).padStart(2, "0");
-      return `${y}-${m}-${d}`;
+      // Return a Date with time set to midnight (date-only semantics)
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate());
     }
     if (opStr === "SVFOP_CURRENT_TIMESTAMP" || opStr === "SVFOP_CURRENT_TIMESTAMP_N") {
-      return new Date().toISOString();
+      const now = new Date();
+      now.setMilliseconds(0);
+      return now;
     }
     if (opStr === "SVFOP_CURRENT_TIME" || opStr === "SVFOP_CURRENT_TIME_N") {
       const now = new Date();
-      const h = String(now.getHours()).padStart(2, "0");
-      const min = String(now.getMinutes()).padStart(2, "0");
-      const s = String(now.getSeconds()).padStart(2, "0");
-      return `${h}:${min}:${s}`;
+      now.setMilliseconds(0);
+      return now;
     }
     if (opStr === "SVFOP_LOCALTIME" || opStr === "SVFOP_LOCALTIME_N") {
       const now = new Date();
-      const h = String(now.getHours()).padStart(2, "0");
-      const min = String(now.getMinutes()).padStart(2, "0");
-      const s = String(now.getSeconds()).padStart(2, "0");
-      return `${h}:${min}:${s}`;
+      now.setMilliseconds(0);
+      return now;
     }
     if (opStr === "SVFOP_LOCALTIMESTAMP" || opStr === "SVFOP_LOCALTIMESTAMP_N") {
-      return new Date().toISOString();
+      const now = new Date();
+      now.setMilliseconds(0);
+      return now;
     }
     if (opStr === "SVFOP_CURRENT_ROLE") return "current_user";
     if (opStr === "SVFOP_CURRENT_USER") return "current_user";
@@ -2622,22 +2641,45 @@ export class ExprEvaluator {
   }
 
   private _compareValues(lhs: unknown, op: string, rhs: unknown): boolean {
+    // Coerce date/string mismatches for comparison
+    let l = lhs;
+    let r = rhs;
+    if (l instanceof Date && typeof r === "string") {
+      const parsed = new Date(r);
+      if (!isNaN(parsed.getTime())) r = parsed;
+    } else if (r instanceof Date && typeof l === "string") {
+      const parsed = new Date(l);
+      if (!isNaN(parsed.getTime())) l = parsed;
+    }
+    if (l instanceof Date && r instanceof Date) {
+      const lt = l.getTime();
+      const rt = r.getTime();
+      switch (op) {
+        case "=": return lt === rt;
+        case "<>": case "!=": return lt !== rt;
+        case "<": return lt < rt;
+        case "<=": return lt <= rt;
+        case ">": return lt > rt;
+        case ">=": return lt >= rt;
+        default: return lt === rt;
+      }
+    }
     switch (op) {
       case "=":
-        return lhs == rhs;
+        return l == r;
       case "<>":
       case "!=":
-        return lhs != rhs;
+        return l != r;
       case "<":
-        return (lhs as number) < (rhs as number);
+        return (l as number) < (r as number);
       case "<=":
-        return (lhs as number) <= (rhs as number);
+        return (l as number) <= (r as number);
       case ">":
-        return (lhs as number) > (rhs as number);
+        return (l as number) > (r as number);
       case ">=":
-        return (lhs as number) >= (rhs as number);
+        return (l as number) >= (r as number);
       default:
-        return lhs === rhs;
+        return l === r;
     }
   }
 

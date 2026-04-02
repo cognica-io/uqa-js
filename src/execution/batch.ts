@@ -10,7 +10,17 @@
 // Unified Query Algebra -- Columnar batch (pure JS arrays, no PyArrow)
 // 1:1 port of uqa/execution/batch.py
 
-export type DataType = "integer" | "float" | "text" | "boolean" | "bytes" | "unknown";
+export type DataType =
+  | "integer"
+  | "float"
+  | "text"
+  | "boolean"
+  | "bytes"
+  | "timestamp"
+  | "date"
+  | "time"
+  | "interval"
+  | "unknown";
 
 // ---------------------------------------------------------------------------
 // Arrow-compatible schema
@@ -422,6 +432,8 @@ export class Batch {
             type = "text";
           } else if (typeof v === "boolean") {
             type = "boolean";
+          } else if (v instanceof Date) {
+            type = "timestamp";
           }
           break;
         }
@@ -449,6 +461,8 @@ export class Batch {
             type = "text";
           } else if (typeof v === "boolean") {
             type = "boolean";
+          } else if (v instanceof Date) {
+            type = "timestamp";
           }
         }
       }

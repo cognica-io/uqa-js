@@ -311,6 +311,18 @@ function extractRelName(rangeVar: Record<string, unknown>): string {
 }
 
 /**
+ * Build a lookup key from a RangeVar, including schema if present.
+ * e.g. "myschema.mytable" or just "mytable".
+ */
+function qualifiedName(rangeVar: Record<string, unknown>): string {
+  const schema = nodeGet(rangeVar, "schemaname");
+  if (schema && typeof schema === "string") {
+    return `${schema}.${nodeStr(rangeVar, "relname")}`;
+  }
+  return nodeStr(rangeVar, "relname");
+}
+
+/**
  * Extract alias from a RangeVar or subquery node.
  */
 function extractAlias(node: Record<string, unknown>): string | null {
@@ -710,7 +722,9 @@ export class SQLCompiler {
   >;
 
   constructor(engine?: unknown) {
-    this._tables = new Map();
+    // Use engine's table store if available (supports schema namespaces)
+    const eng = engine as { _tables?: Map<string, Table> } | undefined;
+    this._tables = eng?._tables ?? new Map();
     this._views = new Map();
     this._sequences = new Map();
     this._engine = engine ?? null;
@@ -839,12 +853,17 @@ export class SQLCompiler {
         return this._compileCreateForeignServer(stmt);
       case "CreateForeignTableStmt":
         return this._compileCreateForeignTable(stmt);
-      // Statements that are no-ops in the in-memory engine
+      case "CreateSchemaStmt":
+        return this._compileCreateSchema(stmt);
       case "VariableSetStmt":
+        return this._compileSet(stmt);
       case "VariableShowStmt":
+        return this._compileShow(stmt);
+      case "DiscardStmt":
+        return this._compileDiscard();
+      // Statements that are no-ops in the in-memory engine
       case "DoStmt":
       case "LockStmt":
-      case "DiscardStmt":
         return null;
       default:
         throw new Error(`Unsupported statement type: ${stmtType}`);
@@ -857,7 +876,7 @@ export class SQLCompiler {
 
   private _compileCreateTable(stmt: Record<string, unknown>): SQLResult | null {
     const relation = asObj(nodeGet(stmt, "relation"));
-    const tableName = extractRelName(relation);
+    const tableName = qualifiedName(relation);
     const ifNotExists = nodeGet(stmt, "if_not_exists") === true;
 
     if (this._tables.has(tableName)) {
@@ -1037,7 +1056,7 @@ export class SQLCompiler {
   ): SQLResult | null {
     const into = asObj(nodeGet(stmt, "into"));
     const rel = asObj(nodeGet(into, "rel"));
-    const tableName = extractRelName(rel);
+    const tableName = qualifiedName(rel);
 
     if (this._tables.has(tableName)) {
       throw new Error(`Table "${tableName}" already exists`);
@@ -1287,8 +1306,27 @@ export class SQLCompiler {
       if (contype === "CONSTR_DEFAULT" || contype === 2) {
         const rawExpr = nodeGet(conNode, "raw_expr");
         if (rawExpr !== null && rawExpr !== undefined) {
-          const evaluator = new ExprEvaluator();
-          defaultValue = evaluator.evaluate(asObj(rawExpr), {});
+          const rawObj = asObj(rawExpr);
+          // Check if this is a SQLValueFunction or FuncCall that should
+          // be deferred (evaluated at insert time, not parse time).
+          const isSQLValueFunc = nodeGet(rawObj, "SQLValueFunction") !== null
+            && nodeGet(rawObj, "SQLValueFunction") !== undefined;
+          const isFuncCall = nodeGet(rawObj, "FuncCall") !== null
+            && nodeGet(rawObj, "FuncCall") !== undefined;
+          if (isSQLValueFunc || isFuncCall) {
+            // Store as deferred default: evaluate at insert time
+            const capturedExpr = rawObj;
+            defaultValue = {
+              _astDefault: true,
+              _evalFn: () => {
+                const ev = new ExprEvaluator();
+                return ev.evaluate(capturedExpr, {});
+              },
+            };
+          } else {
+            const evaluator = new ExprEvaluator();
+            defaultValue = evaluator.evaluate(rawObj, {});
+          }
         }
       }
       // CONSTR_NULL = 0 (explicit NULL constraint -- allowed)
@@ -1324,8 +1362,11 @@ export class SQLCompiler {
   // ==================================================================
 
   private _compileDrop(stmt: Record<string, unknown>): SQLResult | null {
-    // removeType: 41=TABLE, 20=INDEX, 51=VIEW, 17=FOREIGN_SERVER, 18=FOREIGN_TABLE
+    // removeType: 41=TABLE, 20=INDEX, 51=VIEW, 17=FOREIGN_SERVER, 18=FOREIGN_TABLE, 36=SCHEMA
     const removeType = nodeGet(stmt, "removeType") as number | string;
+    if (removeType === 36 || removeType === "OBJECT_SCHEMA") {
+      return this._compileDropSchema(stmt);
+    }
     if (removeType === 20 || removeType === "OBJECT_INDEX") {
       return this._compileDropIndex(stmt);
     }
@@ -1416,6 +1457,14 @@ export class SQLCompiler {
         idxName = extractString(obj);
       }
       if (!idxName) continue;
+
+      // Check in-memory BTREE index
+      const eng = this._engine as { _btreeIndexes?: Map<string, [string, string[]]> } | null;
+      if (eng && eng._btreeIndexes && eng._btreeIndexes.has(idxName)) {
+        eng._btreeIndexes.delete(idxName);
+        this._indexes.delete(idxName);
+        continue;
+      }
 
       const idx = this._indexes.get(idxName);
       if (idx === undefined) {
@@ -1615,7 +1664,7 @@ export class SQLCompiler {
     const idxName = nodeStr(stmt, "idxname");
     const ifNotExists = nodeGet(stmt, "if_not_exists") === true;
     const relation = asObj(nodeGet(stmt, "relation"));
-    const tableName = extractRelName(relation);
+    const tableName = qualifiedName(relation);
     const method = (nodeStr(stmt, "accessMethod") || "btree").toLowerCase();
 
     if (this._indexes.has(idxName)) {
@@ -1687,7 +1736,14 @@ export class SQLCompiler {
       }
     }
     // btree, hnsw, ivf, rtree: vector/spatial indexes are auto-created
-    // from column types, so these remain no-ops for now.
+    // from column types. For in-memory engines, track BTREE metadata for
+    // optimizer use; actual scans fall back to document store iteration.
+    if (method === "btree") {
+      const eng = this._engine as { _btreeIndexes?: Map<string, [string, string[]]> } | null;
+      if (eng && eng._btreeIndexes) {
+        eng._btreeIndexes.set(idxName, [tableName, columns]);
+      }
+    }
 
     this._indexes.set(idxName, { name: idxName, tableName, method, columns });
     return null;
@@ -1699,7 +1755,7 @@ export class SQLCompiler {
 
   private _compileAlterTable(stmt: Record<string, unknown>): SQLResult | null {
     const relation = asObj(nodeGet(stmt, "relation"));
-    const tableName = extractRelName(relation);
+    const tableName = qualifiedName(relation);
     const table = this._tables.get(tableName);
     if (!table) {
       throw new Error(`Table "${tableName}" does not exist`);
@@ -1858,6 +1914,83 @@ export class SQLCompiler {
             table.documentStore.put(docId, doc);
           }
         }
+      } else if (
+        subtypeStr === "AT_AddConstraint" ||
+        subtype === 14 ||
+        subtype === 17
+      ) {
+        // ADD CONSTRAINT (CHECK, UNIQUE, PRIMARY KEY, FOREIGN KEY)
+        const defNode = asObj(nodeGet(cmd, "def"));
+        const constraintNode = asObj(nodeGet(defNode, "Constraint") ?? defNode);
+        const ctRaw = nodeGet(constraintNode, "contype") as number | string;
+        const ctStr = typeof ctRaw === "string" ? ctRaw : "";
+
+        if (ctStr === "CONSTR_CHECK" || ctRaw === 3) {
+          const rawExpr = nodeGet(constraintNode, "raw_expr");
+          const conname = nodeStr(constraintNode, "conname") || "unnamed_check";
+          // Validate existing data
+          const ev = new ExprEvaluator();
+          for (const docId of table.documentStore.docIds) {
+            const doc = table.documentStore.get(docId);
+            if (doc !== null && !ev.evaluate(asObj(rawExpr!), doc)) {
+              throw new Error(
+                `CHECK constraint '${conname}' is violated by existing data in table '${tableName}'`,
+              );
+            }
+          }
+          table.checkConstraints.push([
+            conname,
+            (row: Record<string, unknown>) => {
+              const evaluator = new ExprEvaluator();
+              return Boolean(evaluator.evaluate(asObj(rawExpr!), row));
+            },
+          ]);
+        } else if (ctStr === "CONSTR_UNIQUE" || ctRaw === 4) {
+          const keys = asList(nodeGet(constraintNode, "keys"));
+          for (const k of keys) {
+            const col = extractString(k);
+            const existing = table.columns.get(col);
+            if (existing) {
+              table.columns.set(
+                col,
+                createColumnDef(existing.name, existing.typeName, {
+                  ...existing,
+                  unique: true,
+                }),
+              );
+            }
+          }
+          (table as unknown as { _uniqueIndexesBuilt: boolean })._uniqueIndexesBuilt = false;
+        } else if (ctStr === "CONSTR_PRIMARY" || ctRaw === 5) {
+          const keys = asList(nodeGet(constraintNode, "keys"));
+          if (keys.length > 0) {
+            const pkCol = extractString(keys[0]!);
+            const existing = table.columns.get(pkCol);
+            if (existing) {
+              table.columns.set(
+                pkCol,
+                createColumnDef(existing.name, existing.typeName, {
+                  ...existing,
+                  primaryKey: true,
+                  notNull: true,
+                }),
+              );
+            }
+            (table as { primaryKey: string | null }).primaryKey = pkCol;
+          }
+        } else if (ctStr === "CONSTR_FOREIGN" || ctRaw === 6) {
+          const fkAttrs = asList(nodeGet(constraintNode, "fk_attrs"));
+          const pkTable = asObj(nodeGet(constraintNode, "pktable")!);
+          const pkAttrs = asList(nodeGet(constraintNode, "pk_attrs"));
+          if (fkAttrs.length > 0 && pkAttrs.length > 0) {
+            const fkDef: ForeignKeyDef = {
+              column: extractString(fkAttrs[0]!),
+              refTable: extractRelName(pkTable),
+              refColumn: extractString(pkAttrs[0]!),
+            };
+            table.foreignKeys.push(fkDef);
+          }
+        }
       } else {
         throw new Error(`Unsupported ALTER TABLE subcommand: ${String(subtype)}`);
       }
@@ -1877,7 +2010,7 @@ export class SQLCompiler {
     // OBJECT_TABLE = 36 or 42 depending on pg version
     if (renameTypeStr === "OBJECT_TABLE" || renameType === 36 || renameType === 42) {
       const relation = asObj(nodeGet(stmt, "relation"));
-      const oldName = extractRelName(relation);
+      const oldName = qualifiedName(relation);
       const newName = nodeStr(stmt, "newname");
       const table = this._tables.get(oldName);
       if (!table) {
@@ -1894,7 +2027,7 @@ export class SQLCompiler {
     // OBJECT_COLUMN = 8 or 9 depending on pg version
     if (renameTypeStr === "OBJECT_COLUMN" || renameType === 8 || renameType === 9) {
       const relation = asObj(nodeGet(stmt, "relation"));
-      const tableName = extractRelName(relation);
+      const tableName = qualifiedName(relation);
       const table = this._tables.get(tableName);
       if (!table) {
         throw new Error(`Table "${tableName}" does not exist`);
@@ -1942,7 +2075,7 @@ export class SQLCompiler {
     const relations = asList(nodeGet(stmt, "relations"));
     for (const rel of relations) {
       const rangeVar = asObj(nodeGet(rel, "RangeVar") ?? rel);
-      const tableName = extractRelName(rangeVar);
+      const tableName = qualifiedName(rangeVar);
       const table = this._tables.get(tableName);
       if (!table) {
         throw new Error(`Table "${tableName}" does not exist`);
@@ -1979,7 +2112,7 @@ export class SQLCompiler {
     params: unknown[],
   ): SQLResult | null {
     const relation = asObj(nodeGet(stmt, "relation"));
-    const tableName = extractRelName(relation);
+    const tableName = qualifiedName(relation);
     const table = this._tables.get(tableName);
     if (!table) {
       throw new Error(`Table "${tableName}" does not exist`);
@@ -2118,7 +2251,23 @@ export class SQLCompiler {
         }
       }
 
-      const [docId] = table.insert(srcRow);
+      // When ON CONFLICT DO NOTHING is used without explicit columns,
+      // catch UNIQUE/PK violations at insert time and silently skip.
+      let docId: number;
+      if (
+        onConflictClause !== null &&
+        onConflictClause !== undefined &&
+        conflictCols.length === 0 &&
+        (conflictAction === 1 || conflictAction === "ONCONFLICT_NOTHING")
+      ) {
+        try {
+          [docId] = table.insert(srcRow);
+        } catch {
+          continue;
+        }
+      } else {
+        [docId] = table.insert(srcRow);
+      }
       inserted++;
 
       // Update conflict index for subsequent rows in the batch
@@ -2208,7 +2357,7 @@ export class SQLCompiler {
     params: unknown[],
   ): SQLResult | null {
     const relation = asObj(nodeGet(stmt, "relation"));
-    const tableName = extractRelName(relation);
+    const tableName = qualifiedName(relation);
     const table = this._tables.get(tableName);
     if (!table) {
       throw new Error(`Table "${tableName}" does not exist`);
@@ -2427,7 +2576,7 @@ export class SQLCompiler {
     params: unknown[],
   ): SQLResult | null {
     const relation = asObj(nodeGet(stmt, "relation"));
-    const tableName = extractRelName(relation);
+    const tableName = qualifiedName(relation);
     const table = this._tables.get(tableName);
     if (!table) {
       throw new Error(`Table "${tableName}" does not exist`);
@@ -2564,13 +2713,189 @@ export class SQLCompiler {
   // ==================================================================
 
   private _compileTransaction(stmt: Record<string, unknown>): SQLResult | null {
-    // In-memory engine: transactions are largely a no-op.
     const kind = nodeGet(stmt, "kind") as number | string;
+    const eng = this._engine as Record<string, unknown> | null;
     // 0 = BEGIN, 2 = COMMIT, 3 = ROLLBACK
     // 4 = SAVEPOINT, 5 = RELEASE SAVEPOINT, 6 = ROLLBACK TO SAVEPOINT
-    void kind;
-    void stmt;
-    this._transactionActive = !this._transactionActive;
+    if (kind === 0 || kind === "TRANS_STMT_BEGIN" || kind === "TRANS_STMT_START") {
+      if (eng && typeof (eng as { begin?: unknown }).begin === "function") {
+        (eng as { begin: () => unknown }).begin();
+      }
+      this._transactionActive = true;
+    } else if (kind === 2 || kind === "TRANS_STMT_COMMIT") {
+      if (eng) {
+        const txn = (eng as { _transaction?: { active: boolean; commit: () => void } })
+          ._transaction;
+        if (txn && txn.active) txn.commit();
+      }
+      this._transactionActive = false;
+    } else if (kind === 3 || kind === "TRANS_STMT_ROLLBACK") {
+      if (eng) {
+        const txn = (eng as { _transaction?: { active: boolean; rollback: () => void } })
+          ._transaction;
+        if (txn && txn.active) txn.rollback();
+      }
+      this._transactionActive = false;
+    } else if (kind === 4 || kind === "TRANS_STMT_SAVEPOINT") {
+      const name = nodeStr(asObj(nodeGet(stmt, "options") ?? {}), "str") || "sp";
+      if (eng) {
+        const txn = (eng as { _transaction?: { active: boolean; savepoint: (n: string) => void } })
+          ._transaction;
+        if (txn && txn.active) txn.savepoint(name);
+      }
+    } else if (kind === 5 || kind === "TRANS_STMT_RELEASE") {
+      const name = nodeStr(asObj(nodeGet(stmt, "options") ?? {}), "str") || "sp";
+      if (eng) {
+        const txn = (eng as { _transaction?: { active: boolean; releaseSavepoint: (n: string) => void } })
+          ._transaction;
+        if (txn && txn.active) txn.releaseSavepoint(name);
+      }
+    } else if (kind === 6 || kind === "TRANS_STMT_ROLLBACK_TO") {
+      const name = nodeStr(asObj(nodeGet(stmt, "options") ?? {}), "str") || "sp";
+      if (eng) {
+        const txn = (eng as { _transaction?: { active: boolean; rollbackTo: (n: string) => void } })
+          ._transaction;
+        if (txn && txn.active) txn.rollbackTo(name);
+      }
+    }
+    return null;
+  }
+
+  // ==================================================================
+  // DDL: CREATE SCHEMA / DROP SCHEMA
+  // ==================================================================
+
+  private _compileCreateSchema(stmt: Record<string, unknown>): SQLResult | null {
+    const schemaName = nodeStr(stmt, "schemaname");
+    const ifNotExists = nodeGet(stmt, "if_not_exists") === true;
+    const eng = this._engine as { _tables: { createSchema: (n: string, i: boolean) => void } } | null;
+    if (eng) {
+      eng._tables.createSchema(schemaName, ifNotExists);
+    }
+    return null;
+  }
+
+  private _compileDropSchema(stmt: Record<string, unknown>): SQLResult | null {
+    const objects = asList(nodeGet(stmt, "objects"));
+    const cascade = nodeGet(stmt, "behavior") === "DROP_CASCADE" ||
+      nodeGet(stmt, "behavior") === 1;
+    const ifExists = nodeGet(stmt, "missing_ok") === true;
+    const eng = this._engine as {
+      _tables: { dropSchema: (n: string, c: boolean, i: boolean) => void };
+    } | null;
+    if (eng) {
+      for (const obj of objects) {
+        const items = asList(obj);
+        const schemaName = items.length > 0
+          ? extractString(items[items.length - 1]!)
+          : extractString(obj);
+        eng._tables.dropSchema(schemaName, cascade, ifExists);
+      }
+    }
+    return null;
+  }
+
+  // ==================================================================
+  // Session Variables: SET / SHOW / RESET / DISCARD
+  // ==================================================================
+
+  private static readonly _SESSION_DEFAULTS: Record<string, string> = {
+    server_version: "17.0",
+    server_encoding: "UTF8",
+    client_encoding: "UTF8",
+    client_min_messages: "notice",
+    default_transaction_isolation: "read committed",
+    default_transaction_read_only: "off",
+    is_superuser: "on",
+    session_authorization: "default",
+    standard_conforming_strings: "on",
+    timezone: "UTC",
+    datestyle: "ISO, MDY",
+    intervalstyle: "postgres",
+    integer_datetimes: "on",
+    lc_collate: "en_US.UTF-8",
+    lc_ctype: "en_US.UTF-8",
+    search_path: '"$user", public',
+    statement_timeout: "0",
+    lock_timeout: "0",
+    idle_in_transaction_session_timeout: "0",
+    max_connections: "100",
+    shared_buffers: "128MB",
+    work_mem: "4MB",
+    maintenance_work_mem: "64MB",
+    transaction_isolation: "read committed",
+    transaction_read_only: "off",
+  };
+
+  private _compileSet(stmt: Record<string, unknown>): SQLResult | null {
+    const kind = nodeGet(stmt, "kind") as string | number;
+    const eng = this._engine as {
+      _sessionVars: Map<string, string>;
+      _tables: { searchPath: string[] };
+    } | null;
+    if (!eng) return null;
+
+    const name = nodeStr(stmt, "name");
+    if (
+      kind === "VAR_SET_VALUE" || kind === 0
+    ) {
+      const argNodes = asList(nodeGet(stmt, "args"));
+      const values: string[] = [];
+      for (const arg of argNodes) {
+        values.push(String(extractConstValue(arg, this._params)));
+      }
+      const valueStr = values.join(", ");
+      eng._sessionVars.set(name, valueStr);
+      if (name === "search_path") {
+        eng._tables.searchPath = values
+          .map((v) => v.trim().replace(/^['"]|['"]$/g, ""))
+          .filter((v) => v.length > 0);
+      }
+    } else if (
+      kind === "VAR_SET_DEFAULT" || kind === 1
+    ) {
+      eng._sessionVars.delete(name);
+      if (name === "search_path") {
+        eng._tables.searchPath = ["public"];
+      }
+    } else if (
+      kind === "VAR_RESET" || kind === 2
+    ) {
+      eng._sessionVars.delete(name);
+      if (name === "search_path") {
+        eng._tables.searchPath = ["public"];
+      }
+    } else if (
+      kind === "VAR_RESET_ALL" || kind === 3
+    ) {
+      eng._sessionVars.clear();
+      eng._tables.searchPath = ["public"];
+    }
+    return null;
+  }
+
+  private _compileShow(stmt: Record<string, unknown>): SQLResult {
+    const name = nodeStr(stmt, "name");
+    const eng = this._engine as {
+      _sessionVars: Map<string, string>;
+    } | null;
+    const value = eng?._sessionVars.get(name)
+      ?? SQLCompiler._SESSION_DEFAULTS[name]
+      ?? "";
+    return { columns: [name], rows: [{ [name]: value }] };
+  }
+
+  private _compileDiscard(): SQLResult | null {
+    const eng = this._engine as {
+      _sessionVars: Map<string, string>;
+      _prepared: Map<string, unknown>;
+      _tempTables: Set<string>;
+    } | null;
+    if (eng) {
+      eng._sessionVars.clear();
+      eng._prepared.clear();
+      eng._tempTables.clear();
+    }
     return null;
   }
 
@@ -3386,29 +3711,30 @@ export class SQLCompiler {
     const rangeVar = nodeGet(item, "RangeVar");
     if (rangeVar !== null && rangeVar !== undefined) {
       const rvObj = asObj(rangeVar);
-      const tableName = extractRelName(rvObj);
+      const tableName = qualifiedName(rvObj);
+      const rawName = extractRelName(rvObj);
       const alias = extractAlias(rvObj);
       const schemaName = extractSchemaName(rvObj);
 
       // Virtual schema tables
       if (schemaName === "information_schema") {
-        return this._buildInformationSchemaTable(tableName, alias ?? tableName);
+        return this._buildInformationSchemaTable(rawName, alias ?? rawName);
       }
       if (schemaName === "pg_catalog") {
-        return this._buildPgCatalogTable(tableName, alias ?? tableName);
+        return this._buildPgCatalogTable(rawName, alias ?? rawName);
       }
 
       // Check for view
-      const viewDef = this._views.get(tableName);
+      const viewDef = this._views.get(rawName);
       if (viewDef !== undefined) {
         const viewResult = this._compileSelect(viewDef, params);
-        return this._applyAlias(viewResult.rows, alias ?? tableName);
+        return this._applyAlias(viewResult.rows, alias ?? rawName);
       }
 
       // Check for inlined CTE
-      const inlinedQuery = this._inlinedCTEs.get(tableName);
+      const inlinedQuery = this._inlinedCTEs.get(rawName);
       if (inlinedQuery !== undefined) {
-        this._inlinedCTEs.delete(tableName);
+        this._inlinedCTEs.delete(rawName);
         const result = this._compileSelect(inlinedQuery, params);
         const table = this._resultToTable(tableName, result);
         this._tables.set(tableName, table);
@@ -3417,11 +3743,11 @@ export class SQLCompiler {
         for (const [, doc] of table.documentStore.iterAll()) {
           rows.push({ ...doc });
         }
-        return this._applyAlias(rows, alias ?? tableName);
+        return this._applyAlias(rows, alias ?? rawName);
       }
 
       // Check for foreign table
-      const foreignTable = this._foreignTables.get(tableName);
+      const foreignTable = this._foreignTables.get(rawName);
       if (foreignTable !== undefined) {
         const rows = this._scanForeignTable(foreignTable);
         return this._applyAlias(rows, alias ?? tableName);
@@ -4006,13 +4332,28 @@ export class SQLCompiler {
   ): Record<string, unknown>[] {
     if (viewName === "tables") {
       const rows: Record<string, unknown>[] = [];
-      for (const tname of [...this._tables.keys()].sort()) {
-        rows.push({
-          table_catalog: "",
-          table_schema: "public",
-          table_name: tname,
-          table_type: "BASE TABLE",
-        });
+      const eng = this._engine as { _tables: { qualifiedItems(): Iterable<[string, string, Table]> } } | null;
+      if (eng && typeof eng._tables.qualifiedItems === "function") {
+        const items = [...eng._tables.qualifiedItems()].sort((a, b) =>
+          a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0]),
+        );
+        for (const [schema, tname] of items) {
+          rows.push({
+            table_catalog: "",
+            table_schema: schema,
+            table_name: tname,
+            table_type: "BASE TABLE",
+          });
+        }
+      } else {
+        for (const tname of [...this._tables.keys()].sort()) {
+          rows.push({
+            table_catalog: "",
+            table_schema: "public",
+            table_name: tname,
+            table_type: "BASE TABLE",
+          });
+        }
       }
       for (const ftname of [...this._foreignTables.keys()].sort()) {
         rows.push({
@@ -4042,21 +4383,44 @@ export class SQLCompiler {
         bool: "boolean",
       };
       const rows: Record<string, unknown>[] = [];
-      for (const tname of [...this._tables.keys()].sort()) {
-        const tbl = this._tables.get(tname)!;
-        let pos = 1;
-        for (const [cname, cdef] of tbl.columns) {
-          const displayType = INFO_TYPE_DISPLAY[cdef.typeName] ?? cdef.typeName;
-          rows.push({
-            table_catalog: "",
-            table_schema: "public",
-            table_name: tname,
-            column_name: cname,
-            ordinal_position: pos,
-            data_type: displayType,
-            is_nullable: cdef.notNull ? "NO" : "YES",
-          });
-          pos++;
+      const eng2 = this._engine as { _tables: { qualifiedItems(): Iterable<[string, string, Table]> } } | null;
+      if (eng2 && typeof eng2._tables.qualifiedItems === "function") {
+        const items = [...eng2._tables.qualifiedItems()].sort((a, b) =>
+          a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0]),
+        );
+        for (const [schema, tname, tbl] of items) {
+          let pos = 1;
+          for (const [cname, cdef] of tbl.columns) {
+            const displayType = INFO_TYPE_DISPLAY[cdef.typeName] ?? cdef.typeName;
+            rows.push({
+              table_catalog: "",
+              table_schema: schema,
+              table_name: tname,
+              column_name: cname,
+              ordinal_position: pos,
+              data_type: displayType,
+              is_nullable: cdef.notNull ? "NO" : "YES",
+            });
+            pos++;
+          }
+        }
+      } else {
+        for (const tname of [...this._tables.keys()].sort()) {
+          const tbl = this._tables.get(tname)!;
+          let pos = 1;
+          for (const [cname, cdef] of tbl.columns) {
+            const displayType = INFO_TYPE_DISPLAY[cdef.typeName] ?? cdef.typeName;
+            rows.push({
+              table_catalog: "",
+              table_schema: "public",
+              table_name: tname,
+              column_name: cname,
+              ordinal_position: pos,
+              data_type: displayType,
+              is_nullable: cdef.notNull ? "NO" : "YES",
+            });
+            pos++;
+          }
         }
       }
       for (const ftname of [...this._foreignTables.keys()].sort()) {
@@ -4087,13 +4451,28 @@ export class SQLCompiler {
   ): Record<string, unknown>[] {
     if (viewName === "pg_tables") {
       const rows: Record<string, unknown>[] = [];
-      for (const tname of [...this._tables.keys()].sort()) {
-        rows.push({
-          schemaname: "public",
-          tablename: tname,
-          tableowner: "",
-          tablespace: "",
-        });
+      const eng = this._engine as { _tables: { qualifiedItems(): Iterable<[string, string, Table]> } } | null;
+      if (eng && typeof eng._tables.qualifiedItems === "function") {
+        const items = [...eng._tables.qualifiedItems()].sort((a, b) =>
+          a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0]),
+        );
+        for (const [schema, tname] of items) {
+          rows.push({
+            schemaname: schema,
+            tablename: tname,
+            tableowner: "",
+            tablespace: "",
+          });
+        }
+      } else {
+        for (const tname of [...this._tables.keys()].sort()) {
+          rows.push({
+            schemaname: "public",
+            tablename: tname,
+            tableowner: "",
+            tablespace: "",
+          });
+        }
       }
       return this._applyAlias(rows, alias);
     }
@@ -4200,7 +4579,9 @@ export class SQLCompiler {
     // Check for SELECT *
     if (targetList.length === 0) {
       if (rows.length === 0) return [[], []];
-      const columns = Object.keys(rows[0]!).filter((k) => !k.includes("."));
+      const columns = Object.keys(rows[0]!).filter(
+        (k) => !k.includes(".") && k !== "_doc_id" && k !== "_score",
+      );
       return [
         columns,
         rows.map((r) => {
@@ -4246,10 +4627,10 @@ export class SQLCompiler {
               continue;
             }
           }
-          // SELECT * expansion
+          // SELECT * expansion (filter internal columns)
           if (rows.length > 0) {
             for (const key of Object.keys(rows[0]!)) {
-              if (!key.includes(".")) {
+              if (!key.includes(".") && key !== "_doc_id" && key !== "_score") {
                 columns.push(key);
                 colExprs.push({ name: key, node: null });
               }

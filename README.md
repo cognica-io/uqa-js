@@ -227,6 +227,30 @@ const result = await engine.sql(`
   )
   SELECT name, depth FROM org_tree ORDER BY depth
 `);
+// Schema namespaces
+await engine.sql("CREATE SCHEMA analytics");
+await engine.sql(`
+  CREATE TABLE analytics.events (
+    id SERIAL PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+await engine.sql("INSERT INTO analytics.events (event_type) VALUES ('click')");
+const events = await engine.sql("SELECT * FROM analytics.events");
+
+// search_path resolution
+await engine.sql("SET search_path TO 'analytics', 'public'");
+const result = await engine.sql("SELECT * FROM events"); // resolves to analytics.events
+
+// Session variables
+await engine.sql("SET statement_timeout = 5000");
+const timeout = await engine.sql("SHOW statement_timeout");
+
+// Transactions with rollback (works in both persistent and in-memory engines)
+await engine.sql("BEGIN");
+await engine.sql("INSERT INTO analytics.events (event_type) VALUES ('error')");
+await engine.sql("ROLLBACK"); // discards the insert
 ```
 
 ### Graph Operations (Cypher)
@@ -508,7 +532,7 @@ src/
   sql/            SQL compiler (libpg-query WASM), expression evaluator, FTS query parser,
                   table DDL/DML, FDW dispatch
   api/            Fluent QueryBuilder
-tests/            2,912 tests across 111 test files
+tests/            2,943 tests across 111 test files
 ```
 
 ## SQL Reference
@@ -517,8 +541,8 @@ tests/            2,912 tests across 111 test files
 
 | Category | Syntax |
 |----------|--------|
-| DDL | `CREATE TABLE [IF NOT EXISTS]`, `CREATE TEMPORARY TABLE`, `DROP TABLE [IF EXISTS]`, `CREATE TABLE AS SELECT`, `ALTER TABLE` (ADD/DROP/RENAME COLUMN, SET/DROP DEFAULT, SET/DROP NOT NULL, ALTER TYPE USING), `TRUNCATE TABLE`, `CREATE INDEX [USING gin\|btree\|hnsw\|ivf\|rtree] [WITH (analyzer = 'name')]`, `DROP INDEX`, `CREATE SEQUENCE`/`NEXTVAL`/`CURRVAL`/`SETVAL`, `ALTER SEQUENCE`, `CREATE SERVER ... FOREIGN DATA WRAPPER duckdb_fdw\|arrow_fdw`, `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)`, `DROP SERVER`, `DROP FOREIGN TABLE` |
-| Constraints | `PRIMARY KEY`, `NOT NULL`, `DEFAULT`, `UNIQUE`, `CHECK`, `FOREIGN KEY` (with insert/update/delete validation) |
+| DDL | `CREATE TABLE [IF NOT EXISTS]`, `CREATE TEMPORARY TABLE`, `DROP TABLE [IF EXISTS]`, `CREATE TABLE AS SELECT`, `ALTER TABLE` (ADD/DROP/RENAME COLUMN, SET/DROP DEFAULT, SET/DROP NOT NULL, ALTER TYPE USING, ADD CONSTRAINT), `TRUNCATE TABLE`, `CREATE INDEX [USING gin\|btree\|hnsw\|ivf\|rtree] [WITH (analyzer = 'name')]`, `DROP INDEX [IF EXISTS]`, `CREATE SEQUENCE`/`NEXTVAL`/`CURRVAL`/`SETVAL`, `ALTER SEQUENCE`, `CREATE SCHEMA [IF NOT EXISTS]`, `DROP SCHEMA [IF EXISTS] [CASCADE]`, `CREATE SERVER ... FOREIGN DATA WRAPPER duckdb_fdw\|arrow_fdw`, `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)`, `DROP SERVER`, `DROP FOREIGN TABLE` |
+| Constraints | `PRIMARY KEY`, `NOT NULL`, `DEFAULT` (literal and SQL function defaults: `CURRENT_TIMESTAMP`, `CURRENT_DATE`, etc.), `UNIQUE`, `CHECK`, `FOREIGN KEY` (with insert/update/delete validation), `ALTER TABLE ADD CONSTRAINT` (CHECK, UNIQUE, PRIMARY KEY, FOREIGN KEY) |
 | DML | `INSERT INTO ... VALUES`, `INSERT INTO ... SELECT`, `INSERT ... ON CONFLICT DO NOTHING/UPDATE`, `INSERT ... RETURNING`, `UPDATE ... SET ... WHERE [RETURNING]`, `UPDATE ... FROM` (join), `DELETE FROM ... WHERE [RETURNING]`, `DELETE ... USING` (join) |
 | DQL | `SELECT [DISTINCT] ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY [NULLS FIRST/LAST] ... LIMIT ... OFFSET`, `FETCH FIRST n ROWS ONLY`, standalone `VALUES` |
 | Joins | `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `FULL OUTER JOIN`, `CROSS JOIN` with equality and non-equality `ON` conditions |
@@ -538,8 +562,10 @@ tests/            2,912 tests across 111 test files
 | Functions | 90+ scalar functions: string (`CONCAT_WS`, `POSITION`, `LPAD`, `REVERSE`, `MD5`, `OVERLAY`, `REGEXP_MATCH`, `ENCODE`/`DECODE`, ...), math (`POWER`, `SQRT`, `LN`, `CBRT`, `GCD`, `LCM`, `MIN_SCALE`, `TRIM_SCALE`, trig, ...), conditional (`GREATEST`, `LEAST`, `NULLIF`) |
 | Prepared | `PREPARE name AS ...`, `EXECUTE name(params)`, `DEALLOCATE name` |
 | Utility | `EXPLAIN SELECT ...`, `ANALYZE [table]` |
-| Transactions | `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT` |
-| System | `information_schema.columns`, `pg_catalog.pg_tables`, `pg_catalog.pg_views`, `pg_catalog.pg_indexes`, `pg_catalog.pg_type` |
+| Transactions | `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` (in-memory and persistent engines) |
+| Session | `SET name TO value`, `SHOW name`, `RESET name`, `RESET ALL`, `DISCARD ALL`, `SET search_path TO schema1, schema2` |
+| Schemas | `CREATE SCHEMA [IF NOT EXISTS]`, `DROP SCHEMA [IF EXISTS] [CASCADE]`, schema-qualified table names (`schema.table`), `search_path` resolution for unqualified names |
+| System | `information_schema.tables` (with schema), `information_schema.columns` (with schema), `pg_catalog.pg_tables` (with schema), `pg_catalog.pg_views`, `pg_catalog.pg_indexes`, `pg_catalog.pg_type` |
 
 ### Extended WHERE Functions
 
@@ -774,7 +800,7 @@ import {
 import { highlight, extractQueryTerms } from "uqa";
 
 // Engine and QueryBuilder
-import { Engine, QueryBuilder } from "uqa";
+import { Engine, SchemaAwareTableStore, QueryBuilder } from "uqa";
 
 // SQL
 import { Table } from "uqa";
@@ -787,6 +813,7 @@ import { Table } from "uqa";
 | `Engine.create(options?)` | Create an engine instance (async, initializes WASM) |
 | `engine.sql(query, params?)` | Execute a SQL query |
 | `engine.query(options)` | Create a QueryBuilder for fluent queries |
+| `engine.begin()` | Start a transaction (returns `Transaction` or `InMemoryTransaction`) |
 | `engine.getDocument(id, table)` | Retrieve a document by ID |
 | `engine.close()` | Close the engine and release resources |
 
@@ -879,7 +906,7 @@ npx vitest run tests/test_sql.test.ts
 npm run test:watch
 ```
 
-2,912 tests across 111 test files covering:
+2,943 tests across 111 test files covering:
 
 - Boolean algebra axioms verified with 100 random trials each
 - De Morgan's laws, sorted invariants

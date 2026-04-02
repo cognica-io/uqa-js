@@ -1,5 +1,24 @@
 # History
 
+## 0.3.0 (2026-04-02)
+
+PostgreSQL compatibility: schemas, sessions, transactions, DDL, query fixes.
+
+### Features
+- **Schema namespaces** (`CREATE SCHEMA` / `DROP SCHEMA`): `SchemaAwareTableStore` provides real schema namespaces with `search_path` resolution. Schema-qualified table names (`schema.table`) work throughout DDL and DML. `information_schema.tables` and `pg_catalog.pg_tables` report correct schema names.
+- **Session variables** (`SET` / `SHOW` / `RESET` / `DISCARD`): Session variable storage with PostgreSQL-compatible default values (`server_version`, `client_encoding`, `timezone`, etc.). `SET search_path` propagates to the table store for name resolution.
+- **In-memory transactions** (`BEGIN` / `COMMIT` / `ROLLBACK`): Real rollback support via document store snapshot/restore. Previously transactions required a persistent engine (`dbPath`). Savepoint support included.
+- **`ALTER TABLE ADD CONSTRAINT`**: Supports `CHECK`, `UNIQUE`, `PRIMARY KEY`, and `FOREIGN KEY` constraints added after table creation. CHECK constraints validate existing data.
+- **`ON CONFLICT DO NOTHING` without explicit columns**: INSERT with `ON CONFLICT DO NOTHING` now works without specifying conflict target columns -- catches UNIQUE/PK violations at insert time and silently skips.
+- **In-memory BTREE index tracking**: `CREATE INDEX` / `DROP INDEX` works in in-memory engines (metadata tracking for optimizer use).
+- **Deferred `DEFAULT` evaluation**: `DEFAULT CURRENT_TIMESTAMP`, `DEFAULT CURRENT_DATE`, and similar SQL function defaults are evaluated at insert time, not at table creation time.
+
+### Fixes
+- **Date/time functions return Date objects**: `NOW()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`, `DATE_TRUNC`, `MAKE_TIMESTAMP`, `TO_DATE`, `TO_TIMESTAMP`, `MAKE_DATE` now return JavaScript `Date` objects instead of ISO strings. Date/string comparison coercion added throughout the expression evaluator and predicate system.
+- **Filter `_doc_id`/`_score` from `SELECT *`**: Internal columns injected by scan operators are no longer exposed in single-table `SELECT *` results. They remain available for graph traversal and search queries.
+- **LEFT JOIN NULL padding**: Unmatched rows in LEFT/RIGHT/FULL outer joins now explicitly set opposite-side columns to `null`, matching PostgreSQL semantics. Previously unmatched rows had missing fields instead of `null`.
+- **TIMESTAMP/DATE/TIME/INTERVAL DataType**: Added to the batch type system with proper inference from Date objects.
+
 ## 0.2.0 (2026-04-01)
 
 SQL faceted search and search result highlighting.

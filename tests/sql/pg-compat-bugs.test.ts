@@ -503,8 +503,11 @@ describe("DateTimeFunctions", () => {
   it("to date", async () => {
     const r = await engine.sql("SELECT TO_DATE('2024-01-15', 'YYYY-MM-DD') AS v");
     expect(r!.rows.length).toBe(1);
-    const v = r!.rows[0]!["v"] as string;
-    expect(v).toContain("2024-01-15");
+    const v = r!.rows[0]!["v"] as Date;
+    expect(v).toBeInstanceOf(Date);
+    expect(v.getFullYear()).toBe(2024);
+    expect(v.getMonth()).toBe(0); // January
+    expect(v.getDate()).toBe(15);
   });
 
   it("to timestamp", async () => {
@@ -519,10 +522,11 @@ describe("DateTimeFunctions", () => {
   it("make date", async () => {
     const r = await engine.sql("SELECT MAKE_DATE(2024, 6, 15) AS v");
     expect(r!.rows.length).toBe(1);
-    const v = r!.rows[0]!["v"] as string;
-    expect(v).toContain("2024");
-    expect(v).toContain("06");
-    expect(v).toContain("15");
+    const v = r!.rows[0]!["v"] as Date;
+    expect(v).toBeInstanceOf(Date);
+    expect(v.getFullYear()).toBe(2024);
+    expect(v.getMonth()).toBe(5); // June
+    expect(v.getDate()).toBe(15);
   });
 
   it("age", async () => {
@@ -575,5 +579,305 @@ describe("IntervalAndNamedArg", () => {
     const v = r!.rows[0]!["v"] as string;
     // 10 days displayed separately
     expect(v).toContain("10 day");
+  });
+});
+
+// ==================================================================
+// Session Variables: SET / SHOW / RESET / DISCARD
+// ==================================================================
+
+describe("SessionVariables", () => {
+  it("set and show", async () => {
+    const r = await engine.sql("SET client_encoding TO 'UTF8'");
+    void r;
+    const result = await engine.sql("SHOW client_encoding");
+    expect(result!.columns).toEqual(["client_encoding"]);
+    expect(result!.rows[0]!["client_encoding"]).toBe("UTF8");
+  });
+
+  it("set integer value", async () => {
+    await engine.sql("SET statement_timeout = 5000");
+    const result = await engine.sql("SHOW statement_timeout");
+    expect(result!.rows[0]!["statement_timeout"]).toBe("5000");
+  });
+
+  it("show defaults", async () => {
+    const result = await engine.sql("SHOW server_version");
+    expect(result!.rows[0]!["server_version"]).toBe("17.0");
+  });
+
+  it("reset", async () => {
+    await engine.sql("SET client_encoding TO 'LATIN1'");
+    await engine.sql("RESET client_encoding");
+    const result = await engine.sql("SHOW client_encoding");
+    expect(result!.rows[0]!["client_encoding"]).toBe("UTF8");
+  });
+
+  it("reset all", async () => {
+    await engine.sql("SET client_encoding TO 'LATIN1'");
+    await engine.sql("SET statement_timeout = 9999");
+    await engine.sql("RESET ALL");
+    const result = await engine.sql("SHOW client_encoding");
+    expect(result!.rows[0]!["client_encoding"]).toBe("UTF8");
+  });
+
+  it("discard all", async () => {
+    await engine.sql("SET client_encoding TO 'LATIN1'");
+    await engine.sql("DISCARD ALL");
+    const result = await engine.sql("SHOW client_encoding");
+    expect(result!.rows[0]!["client_encoding"]).toBe("UTF8");
+  });
+});
+
+// ==================================================================
+// In-memory transactions (BEGIN / COMMIT / ROLLBACK)
+// ==================================================================
+
+describe("InMemoryTransactions", () => {
+  it("begin commit", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    await engine.sql("BEGIN");
+    await engine.sql("INSERT INTO t VALUES (1, 'a')");
+    await engine.sql("COMMIT");
+    const result = await engine.sql("SELECT * FROM t");
+    expect(result!.rows.length).toBe(1);
+  });
+
+  it("begin rollback", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    await engine.sql("INSERT INTO t VALUES (1, 'a')");
+    await engine.sql("BEGIN");
+    await engine.sql("INSERT INTO t VALUES (2, 'b')");
+    await engine.sql("ROLLBACK");
+    const result = await engine.sql("SELECT * FROM t");
+    expect(result!.rows.length).toBe(1);
+    expect(result!.rows[0]!["v"]).toBe("a");
+  });
+});
+
+// ==================================================================
+// SELECT * must not expose internal columns (_doc_id, _score)
+// ==================================================================
+
+describe("SelectStarNoInternalColumns", () => {
+  it("single table no internal cols", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+    await engine.sql("INSERT INTO t VALUES (1, 'Alice'), (2, 'Bob')");
+    const result = await engine.sql("SELECT * FROM t");
+    expect(result!.columns).not.toContain("_doc_id");
+    expect(result!.columns).not.toContain("_score");
+    expect(new Set(result!.columns)).toEqual(new Set(["id", "name"]));
+    expect(result!.rows.length).toBe(2);
+  });
+
+  it("explicit columns still work", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+    await engine.sql("INSERT INTO t VALUES (1, 'Alice')");
+    const result = await engine.sql("SELECT id, name FROM t");
+    expect(result!.columns).toEqual(["id", "name"]);
+  });
+
+  it("select star with order by", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+    await engine.sql("INSERT INTO t VALUES (2, 'b'), (1, 'a')");
+    const result = await engine.sql("SELECT * FROM t ORDER BY id");
+    expect(result!.columns).not.toContain("_doc_id");
+    expect(result!.rows[0]!["id"]).toBe(1);
+  });
+});
+
+// ==================================================================
+// DEFAULT CURRENT_TIMESTAMP and similar
+// ==================================================================
+
+describe("DefaultSQLFunctions", () => {
+  it("default current timestamp", async () => {
+    await engine.sql(
+      "CREATE TABLE log (" +
+        "id SERIAL PRIMARY KEY, " +
+        "msg TEXT, " +
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+    );
+    await engine.sql("INSERT INTO log (msg) VALUES ('hello')");
+    const result = await engine.sql("SELECT created_at FROM log");
+    const ts = result!.rows[0]!["created_at"];
+    expect(ts).toBeInstanceOf(Date);
+  });
+
+  it("default current date", async () => {
+    await engine.sql(
+      "CREATE TABLE events (" +
+        "id SERIAL PRIMARY KEY, " +
+        "event_date DATE DEFAULT CURRENT_DATE)",
+    );
+    await engine.sql("INSERT INTO events (id) VALUES (1)");
+    const result = await engine.sql("SELECT event_date FROM events");
+    const d = result!.rows[0]!["event_date"];
+    expect(d).toBeInstanceOf(Date);
+  });
+
+  it("default literal still works", async () => {
+    await engine.sql(
+      "CREATE TABLE t (id INTEGER PRIMARY KEY, status TEXT DEFAULT 'active')",
+    );
+    await engine.sql("INSERT INTO t (id) VALUES (1)");
+    const result = await engine.sql("SELECT status FROM t");
+    expect(result!.rows[0]!["status"]).toBe("active");
+  });
+});
+
+// ==================================================================
+// ALTER TABLE ADD CONSTRAINT
+// ==================================================================
+
+describe("AlterTableAddConstraint", () => {
+  it("add unique constraint", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER, email TEXT)");
+    await engine.sql("INSERT INTO t VALUES (1, 'a@b.c')");
+    await engine.sql("ALTER TABLE t ADD CONSTRAINT uq_email UNIQUE (email)");
+    await expect(
+      engine.sql("INSERT INTO t VALUES (2, 'a@b.c')"),
+    ).rejects.toThrow(/UNIQUE/);
+  });
+
+  it("add check constraint", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER, val INTEGER)");
+    await engine.sql("INSERT INTO t VALUES (1, 10)");
+    await engine.sql("ALTER TABLE t ADD CONSTRAINT chk CHECK (val > 0)");
+    await expect(
+      engine.sql("INSERT INTO t VALUES (2, -1)"),
+    ).rejects.toThrow(/CHECK/);
+  });
+});
+
+// ==================================================================
+// ON CONFLICT DO NOTHING without explicit columns
+// ==================================================================
+
+describe("OnConflictDoNothing", () => {
+  it("without explicit columns", async () => {
+    await engine.sql(
+      "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+    );
+    await engine.sql("INSERT INTO t VALUES (1, 'Alice')");
+    // Should not throw -- skip the conflicting row
+    await engine.sql("INSERT INTO t VALUES (1, 'Bob') ON CONFLICT DO NOTHING");
+    const result = await engine.sql("SELECT name FROM t WHERE id = 1");
+    expect(result!.rows[0]!["name"]).toBe("Alice");
+  });
+});
+
+// ==================================================================
+// In-memory BTREE index (CREATE/DROP INDEX)
+// ==================================================================
+
+describe("InMemoryIndex", () => {
+  it("create and drop index", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)");
+    await engine.sql("CREATE INDEX idx_val ON t (val)");
+    // Should not throw
+    await engine.sql("DROP INDEX idx_val");
+  });
+
+  it("drop index if exists", async () => {
+    // Should not throw even if index does not exist
+    await engine.sql("DROP INDEX IF EXISTS nonexistent_idx");
+  });
+});
+
+// ==================================================================
+// Schema support (CREATE SCHEMA / DROP SCHEMA / qualified names)
+// ==================================================================
+
+describe("SchemaSupport", () => {
+  it("create schema", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    expect(engine._tables.schemas.has("myschema")).toBe(true);
+  });
+
+  it("create schema if not exists", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    await engine.sql("CREATE SCHEMA IF NOT EXISTS myschema");
+  });
+
+  it("create schema duplicate raises", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    await expect(engine.sql("CREATE SCHEMA myschema")).rejects.toThrow(
+      /already exists/,
+    );
+  });
+
+  it("create table in schema", async () => {
+    await engine.sql("CREATE SCHEMA sales");
+    await engine.sql(
+      "CREATE TABLE sales.orders (id INTEGER PRIMARY KEY, total INTEGER)",
+    );
+    await engine.sql("INSERT INTO sales.orders VALUES (1, 100)");
+    const result = await engine.sql("SELECT total FROM sales.orders");
+    expect(result!.rows[0]!["total"]).toBe(100);
+  });
+
+  it("schema isolation", async () => {
+    await engine.sql("CREATE SCHEMA s1");
+    await engine.sql("CREATE SCHEMA s2");
+    await engine.sql("CREATE TABLE s1.t (id INTEGER PRIMARY KEY, val TEXT)");
+    await engine.sql("CREATE TABLE s2.t (id INTEGER PRIMARY KEY, val TEXT)");
+    await engine.sql("INSERT INTO s1.t VALUES (1, 'schema1')");
+    await engine.sql("INSERT INTO s2.t VALUES (1, 'schema2')");
+    const r1 = await engine.sql("SELECT val FROM s1.t");
+    const r2 = await engine.sql("SELECT val FROM s2.t");
+    expect(r1!.rows[0]!["val"]).toBe("schema1");
+    expect(r2!.rows[0]!["val"]).toBe("schema2");
+  });
+
+  it("search path resolution", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    await engine.sql(
+      "CREATE TABLE myschema.users (id INTEGER PRIMARY KEY, name TEXT)",
+    );
+    await engine.sql("INSERT INTO myschema.users VALUES (1, 'Alice')");
+    await engine.sql("SET search_path TO 'myschema', 'public'");
+    const result = await engine.sql("SELECT name FROM users");
+    expect(result!.rows[0]!["name"]).toBe("Alice");
+  });
+
+  it("default public schema", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER PRIMARY KEY)");
+    await engine.sql("INSERT INTO t VALUES (1)");
+    const result = await engine.sql("SELECT id FROM public.t");
+    expect(result!.rows[0]!["id"]).toBe(1);
+  });
+
+  it("drop schema empty", async () => {
+    await engine.sql("CREATE SCHEMA temp_schema");
+    await engine.sql("DROP SCHEMA temp_schema");
+    expect(engine._tables.schemas.has("temp_schema")).toBe(false);
+  });
+
+  it("drop schema cascade", async () => {
+    await engine.sql("CREATE SCHEMA doomed");
+    await engine.sql("CREATE TABLE doomed.t (id INTEGER)");
+    await engine.sql("DROP SCHEMA doomed CASCADE");
+    expect(engine._tables.schemas.has("doomed")).toBe(false);
+  });
+
+  it("drop schema nonempty raises", async () => {
+    await engine.sql("CREATE SCHEMA nonempty");
+    await engine.sql("CREATE TABLE nonempty.t (id INTEGER)");
+    await expect(engine.sql("DROP SCHEMA nonempty")).rejects.toThrow(/not empty/);
+  });
+
+  it("drop schema if exists", async () => {
+    await engine.sql("DROP SCHEMA IF EXISTS nonexistent");
+  });
+
+  it("information schema tables", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    await engine.sql("CREATE TABLE myschema.t (id INTEGER)");
+    const result = await engine.sql(
+      "SELECT table_schema, table_name FROM information_schema.tables " +
+        "WHERE table_name = 't'",
+    );
+    expect(result!.rows.some((r) => r["table_schema"] === "myschema")).toBe(true);
   });
 });

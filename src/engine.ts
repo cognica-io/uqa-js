@@ -20,7 +20,10 @@ import type { GraphStore } from "./storage/abc/graph-store.js";
 import { QueryBuilder } from "./api/query-builder.js";
 import type { Catalog } from "./storage/catalog.js";
 import type { IndexManager } from "./storage/index-manager.js";
-import { Transaction as TransactionClass } from "./storage/transaction.js";
+import {
+  Transaction as TransactionClass,
+  InMemoryTransaction,
+} from "./storage/transaction.js";
 import type { Transaction } from "./storage/transaction.js";
 import { PathIndex as PathIndexClass } from "./graph/index.js";
 import type { PathIndex } from "./graph/index.js";
@@ -44,6 +47,207 @@ import { ParameterLearner } from "./scoring/parameter-learner.js";
 import { estimateConvWeights as estimateConvWeightsFn } from "./operators/deep-fusion.js";
 import type { ManagedConnection } from "./storage/managed-connection.js";
 
+// -- SchemaAwareTableStore ---------------------------------------------------
+
+/**
+ * Schema-qualified table namespace with search_path resolution.
+ *
+ * Internally stores tables in `{schema: {tableName: Table}}`.
+ * Implements the Map-like interface so existing code that does
+ * `_tables.get(name)`, `_tables.set(name, t)`, `_tables.has(name)`
+ * continues to work.  Unqualified names resolve via `search_path`.
+ * Qualified names (`"schema.table"`) resolve directly.
+ */
+export class SchemaAwareTableStore {
+  private _schemas: Map<string, Map<string, Table>>;
+  private _searchPath: string[];
+
+  constructor() {
+    this._schemas = new Map([["public", new Map()]]);
+    this._searchPath = ["public"];
+  }
+
+  // -- Schema management ---------------------------------------------------
+
+  createSchema(name: string, ifNotExists = false): void {
+    if (this._schemas.has(name)) {
+      if (ifNotExists) return;
+      throw new Error(`Schema '${name}' already exists`);
+    }
+    this._schemas.set(name, new Map());
+  }
+
+  dropSchema(name: string, cascade = false, ifExists = false): void {
+    if (!this._schemas.has(name)) {
+      if (ifExists) return;
+      throw new Error(`Schema '${name}' does not exist`);
+    }
+    if (name === "public") {
+      throw new Error("Cannot drop schema 'public'");
+    }
+    const tables = this._schemas.get(name)!;
+    if (tables.size > 0 && !cascade) {
+      throw new Error(`Schema '${name}' is not empty, use CASCADE to drop`);
+    }
+    this._schemas.delete(name);
+  }
+
+  get searchPath(): string[] {
+    return [...this._searchPath];
+  }
+
+  set searchPath(value: string[]) {
+    this._searchPath = [...value];
+  }
+
+  get schemas(): Set<string> {
+    return new Set(this._schemas.keys());
+  }
+
+  // -- Resolution helpers -------------------------------------------------
+
+  private _parseQualified(name: string): [string | null, string] {
+    const dot = name.indexOf(".");
+    if (dot !== -1) {
+      const schema = name.substring(0, dot);
+      if (this._schemas.has(schema)) {
+        return [schema, name.substring(dot + 1)];
+      }
+    }
+    return [null, name];
+  }
+
+  private _resolve(name: string): [string, string] | null {
+    const [schema, table] = this._parseQualified(name);
+    if (schema !== null) {
+      const tables = this._schemas.get(schema);
+      if (tables && tables.has(table)) return [schema, table];
+      return null;
+    }
+    for (const s of this._searchPath) {
+      const tables = this._schemas.get(s);
+      if (tables && tables.has(table)) return [s, table];
+    }
+    return null;
+  }
+
+  private _defaultSchema(): string {
+    for (const s of this._searchPath) {
+      if (this._schemas.has(s)) return s;
+    }
+    return "public";
+  }
+
+  // -- Map-compatible interface -------------------------------------------
+
+  get(name: string): Table | undefined {
+    const resolved = this._resolve(name);
+    if (!resolved) return undefined;
+    const [s, t] = resolved;
+    return this._schemas.get(s)!.get(t);
+  }
+
+  set(name: string, table: Table): this {
+    const [schema, tableName] = this._parseQualified(name);
+    const s = schema ?? this._defaultSchema();
+    if (!this._schemas.has(s)) {
+      this._schemas.set(s, new Map());
+    }
+    this._schemas.get(s)!.set(tableName, table);
+    return this;
+  }
+
+  has(name: string): boolean {
+    return this._resolve(name) !== null;
+  }
+
+  delete(name: string): boolean {
+    const resolved = this._resolve(name);
+    if (!resolved) return false;
+    const [s, t] = resolved;
+    return this._schemas.get(s)!.delete(t);
+  }
+
+  get size(): number {
+    let count = 0;
+    for (const tables of this._schemas.values()) count += tables.size;
+    return count;
+  }
+
+  keys(): IterableIterator<string> {
+    const allKeys: string[] = [];
+    for (const tables of this._schemas.values()) {
+      for (const name of tables.keys()) allKeys.push(name);
+    }
+    return allKeys[Symbol.iterator]();
+  }
+
+  values(): IterableIterator<Table> {
+    const allValues: Table[] = [];
+    for (const tables of this._schemas.values()) {
+      for (const table of tables.values()) allValues.push(table);
+    }
+    return allValues[Symbol.iterator]();
+  }
+
+  entries(): IterableIterator<[string, Table]> {
+    const allEntries: [string, Table][] = [];
+    for (const tables of this._schemas.values()) {
+      for (const [name, table] of tables) allEntries.push([name, table]);
+    }
+    return allEntries[Symbol.iterator]();
+  }
+
+  forEach(cb: (value: Table, key: string) => void): void {
+    for (const tables of this._schemas.values()) {
+      for (const [name, table] of tables) cb(table, name);
+    }
+  }
+
+  clear(): void {
+    for (const tables of this._schemas.values()) {
+      tables.clear();
+    }
+  }
+
+  [Symbol.iterator](): IterableIterator<[string, Table]> {
+    return this.entries();
+  }
+
+  // -- Schema-qualified access -------------------------------------------
+
+  setInSchema(schema: string, tableName: string, table: Table): void {
+    if (!this._schemas.has(schema)) {
+      this._schemas.set(schema, new Map());
+    }
+    this._schemas.get(schema)!.set(tableName, table);
+  }
+
+  getFromSchema(schema: string, tableName: string): Table | undefined {
+    return this._schemas.get(schema)?.get(tableName);
+  }
+
+  tablesInSchema(schema: string): Map<string, Table> {
+    return new Map(this._schemas.get(schema) ?? []);
+  }
+
+  *qualifiedItems(): Iterable<[string, string, Table]> {
+    for (const [schema, tables] of this._schemas) {
+      for (const [name, table] of tables) {
+        yield [schema, name, table];
+      }
+    }
+  }
+
+  *items(): Iterable<[string, Table]> {
+    for (const tables of this._schemas.values()) {
+      yield* tables;
+    }
+  }
+}
+
+// -- Engine Options ---------------------------------------------------------
+
 export interface EngineOptions {
   dbPath?: string;
   parallelWorkers?: number;
@@ -51,7 +255,7 @@ export interface EngineOptions {
 }
 
 export class Engine {
-  _tables: Map<string, Table>;
+  _tables: SchemaAwareTableStore;
   _views: Map<string, unknown>; // name -> SelectStmt AST
   _prepared: Map<string, unknown>; // name -> PrepareStmt AST
   _sequences: Map<string, Record<string, number>>;
@@ -62,9 +266,13 @@ export class Engine {
   _foreignServers: Map<string, ForeignServer>;
   _foreignTables: Map<string, ForeignTable>;
   _models: Map<string, Record<string, unknown>>;
+  // In-memory BTREE index tracking: indexName -> [tableName, columns]
+  _btreeIndexes: Map<string, [string, string[]]>;
+  // Session variables (SET/SHOW/RESET)
+  _sessionVars: Map<string, string>;
   private _catalog: Catalog | null;
   private _indexManager: IndexManager | null;
-  private _transaction: Transaction | null;
+  private _transaction: Transaction | InMemoryTransaction | null;
   private _compiler: SQLCompiler;
   private _dbPath: string | null;
   private _parallelWorkers: number;
@@ -74,7 +282,7 @@ export class Engine {
     this._dbPath = opts?.dbPath ?? null;
     this._parallelWorkers = opts?.parallelWorkers ?? 4;
     this._spillThreshold = opts?.spillThreshold ?? 0;
-    this._tables = new Map();
+    this._tables = new SchemaAwareTableStore();
     this._views = new Map();
     this._prepared = new Map();
     this._sequences = new Map();
@@ -85,6 +293,8 @@ export class Engine {
     this._foreignServers = new Map();
     this._foreignTables = new Map();
     this._models = new Map();
+    this._btreeIndexes = new Map();
+    this._sessionVars = new Map();
     this._catalog = null;
     this._indexManager = null;
     this._transaction = null;
@@ -478,9 +688,13 @@ export class Engine {
 
   // -- Transaction interface --------------------------------------------------
 
-  begin(): Transaction {
+  begin(): Transaction | InMemoryTransaction {
     if (this._catalog === null) {
-      throw new Error("Transactions require a persistent engine (dbPath)");
+      if (this._transaction !== null && this._transaction.active) {
+        throw new Error("Transaction already active");
+      }
+      this._transaction = new InMemoryTransaction(this._tables);
+      return this._transaction;
     }
     if (this._transaction !== null && this._transaction.active) {
       throw new Error("Transaction already active");
