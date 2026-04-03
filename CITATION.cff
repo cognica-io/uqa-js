@@ -9,7 +9,7 @@ authors:
     affiliation: "Cognica, Inc."
 repository-code: "https://github.com/cognica-io/uqa-js"
 license: AGPL-3.0-only
-version: 0.3.2
+version: 0.3.3
 date-released: "2026-04-03"
 abstract: >-
   TypeScript port of UQA (Unified Query Algebra), a multi-paradigm database

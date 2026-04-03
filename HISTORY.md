@@ -1,11 +1,21 @@
 # History
 
+## 0.3.3 (2026-04-03)
+
+UQA posting-list scan pushed below JOIN for index-driven performance.
+
+### Fixes
+- **UQA + JOIN predicate pushdown**: The 0.3.2 fix for UQA WHERE functions with JOIN materialized the full join first (N x M rows), then filtered via a score map. This was correct but O(N*M) -- for large tables the full cartesian product was built before any filtering. Restructured to push the GIN index scan into the FROM phase: `_resolveFromItem()` now checks `_uqaFromFilter` and emits only posting-list matches (with scores) for the target table before the join executes, so the join operates on the small result set instead of the full table.
+
+### Tests
+- 2,947 tests across 111 test files
+
 ## 0.3.2 (2026-04-03)
 
 UQA WHERE functions (fusion, scoring, retrieval) now work correctly in JOIN queries.
 
 ### Fixes
-- **UQA WHERE functions with JOIN**: `fuse_log_odds`, `fuse_prob_and`, `fuse_prob_or`, `fuse_attention`, `fuse_learned`, `bayesian_match`, `knn_match`, `staged_retrieval`, `progressive_fusion`, `deep_fusion`, and all other posting-list WHERE functions now work in queries that include `JOIN`. Previously, `_resolveFromTableName()` returned `null` for `JoinExpr` FROM clauses, causing UQA functions to fall through to the generic expression evaluator which threw `Unknown SQL function`. The fix adds alias-to-table resolution for JoinExpr trees and pushes the posting-list scan below the join: `_resolveFromItem()` emits only GIN-index-matched rows (with scores) for the target table before the join executes, so the join operates on the small posting-list result set rather than the full table.
+- **UQA WHERE functions with JOIN**: `fuse_log_odds`, `fuse_prob_and`, `fuse_prob_or`, `fuse_attention`, `fuse_learned`, `bayesian_match`, `knn_match`, `staged_retrieval`, `progressive_fusion`, `deep_fusion`, and all other posting-list WHERE functions now work in queries that include `JOIN`. Previously, `_resolveFromTableName()` returned `null` for `JoinExpr` FROM clauses, causing UQA functions to fall through to the generic expression evaluator which threw `Unknown SQL function`.
 
 ### Tests
 - 2,947 tests across 111 test files
