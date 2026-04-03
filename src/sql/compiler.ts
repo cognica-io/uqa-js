@@ -2969,29 +2969,111 @@ export class SQLCompiler {
   private _compileExplain(stmt: Record<string, unknown>, params: unknown[]): SQLResult {
     const query = asObj(nodeGet(stmt, "query"));
     const selectStmt = asObj(nodeGet(query, "SelectStmt") ?? query);
-
-    // Execute the inner query to provide basic info
     const fromClause = asList(nodeGet(selectStmt, "fromClause"));
-    let tableInfo = `${String(this._tables.size)} tables`;
-    if (fromClause.length > 0) {
-      const firstFrom = fromClause[0]!;
-      const rv = asObj(nodeGet(firstFrom, "RangeVar") ?? firstFrom);
-      const tname = extractRelName(rv);
-      if (tname) {
-        const t = this._tables.get(tname);
-        if (t) {
-          tableInfo = `table "${tname}" (${String(t.rowCount)} rows)`;
+    const whereClause = nodeGet(selectStmt, "whereClause");
+
+    void params;
+
+    // Detect UQA function in WHERE and resolve the target table
+    let uqaTarget: string | null = null;
+    let uqaFuncName: string | null = null;
+    if (whereClause !== null && whereClause !== undefined) {
+      const whereObj = asObj(whereClause);
+      if (SQLCompiler._containsUQAFunction(whereObj)) {
+        uqaFuncName = SQLCompiler._extractTopUQAFuncName(whereObj);
+        const singleTable = this._resolveFromTableName(fromClause);
+        if (singleTable) {
+          uqaTarget = singleTable;
+        } else if (fromClause.length > 0) {
+          const aliasMap = this._collectFromAliases(fromClause);
+          const colAlias = SQLCompiler._extractUQAColumnAlias(whereObj);
+          if (colAlias && aliasMap.has(colAlias)) {
+            uqaTarget = aliasMap.get(colAlias)!;
+          }
         }
       }
     }
 
-    void params;
+    // Collect all referenced tables from the FROM clause
+    const allTables: { name: string; alias: string | null }[] = [];
+    if (fromClause.length > 0) {
+      const aliasMap = this._collectFromAliases(fromClause);
+      const seen = new Set<string>();
+      for (const [alias, name] of aliasMap) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        allTables.push({ name, alias: alias !== name ? alias : null });
+      }
+    }
 
-    const plan = `Seq Scan on ${tableInfo}`;
+    const isJoin = fromClause.length > 0 && this._resolveFromTableName(fromClause) === null;
+    const planLines: string[] = [];
+
+    if (isJoin) {
+      // Determine join type
+      let joinLabel = "Hash Join";
+      if (fromClause.length === 1) {
+        const je = nodeGet(fromClause[0]!, "JoinExpr");
+        if (je !== null && je !== undefined) {
+          const jt = nodeGet(asObj(je), "jointype");
+          if (jt === 1 || jt === "JOIN_LEFT") joinLabel = "Hash Left Join";
+          else if (jt === 3 || jt === "JOIN_RIGHT") joinLabel = "Hash Right Join";
+          else if (jt === 2 || jt === "JOIN_FULL") joinLabel = "Hash Full Join";
+          else if (jt === 5 || jt === "JOIN_CROSS") joinLabel = "Nested Loop";
+        }
+      }
+      planLines.push(joinLabel);
+      for (const { name, alias } of allTables) {
+        const table = this._tables.get(name);
+        const rc = table ? String(table.rowCount) : "?";
+        const label = alias ? `"${name}" ${alias}` : `"${name}"`;
+        if (name === uqaTarget && uqaFuncName) {
+          planLines.push(`  -> GIN Index Scan using ${uqaFuncName} on ${label} (${rc} rows)`);
+        } else {
+          planLines.push(`  -> Seq Scan on ${label} (${rc} rows)`);
+        }
+      }
+    } else if (allTables.length > 0) {
+      const { name } = allTables[0]!;
+      const table = this._tables.get(name);
+      const rc = table ? String(table.rowCount) : "?";
+      if (uqaTarget && uqaFuncName) {
+        planLines.push(`GIN Index Scan using ${uqaFuncName} on "${name}" (${rc} rows)`);
+      } else {
+        planLines.push(`Seq Scan on table "${name}" (${rc} rows)`);
+      }
+    } else {
+      planLines.push("Result");
+    }
+
     return {
       columns: ["QUERY PLAN"],
-      rows: [{ "QUERY PLAN": plan }],
+      rows: planLines.map((line) => ({ "QUERY PLAN": line })),
     };
+  }
+
+  /**
+   * Extract the outermost UQA function name from a WHERE clause AST.
+   */
+  private static _extractTopUQAFuncName(node: Record<string, unknown>): string | null {
+    if (isFuncCall(node)) {
+      const name = getFuncName(node);
+      if (UQA_WHERE_FUNCTIONS.has(name)) return name;
+    }
+    const fc = nodeGet(node, "FuncCall");
+    if (fc !== null && fc !== undefined) {
+      const name = getFuncName(asObj(fc));
+      if (UQA_WHERE_FUNCTIONS.has(name)) return name;
+    }
+    const boolExpr = asObj(nodeGet(node, "BoolExpr") ?? {});
+    if (Object.keys(boolExpr).length > 0) {
+      const boolArgs = asList(nodeGet(boolExpr, "args"));
+      for (const ba of boolArgs) {
+        const result = SQLCompiler._extractTopUQAFuncName(ba);
+        if (result) return result;
+      }
+    }
+    return null;
   }
 
   private _compileAnalyze(stmt: Record<string, unknown>): SQLResult | null {
