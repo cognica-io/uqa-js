@@ -1,5 +1,15 @@
 # History
 
+## 0.3.5 (2026-04-03)
+
+Primary key point lookup for O(1) single-row access.
+
+### Features
+- **PK point lookup**: `WHERE pk = expr` on single-table SELECT now does an O(1) document store lookup instead of a full table scan. Detects integer primary key equality against constants, parameters (`$1`), and scalar subqueries. Also works when the equality is one conjunct of an AND. Correlated column references (`WHERE e.dept_id = d.id`) are correctly excluded. Eliminates the major bottleneck in correlated subqueries where the inner query re-scans the full table for each outer row.
+
+### Tests
+- 2,947 tests across 111 test files
+
 ## 0.3.4 (2026-04-03)
 
 Hash join for equi-join conditions and EXPLAIN improvements.

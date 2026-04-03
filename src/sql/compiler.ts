@@ -3270,7 +3270,15 @@ export class SQLCompiler {
         rows = this._resolveFrom(fromClause, params);
       }
     } else {
-      rows = this._resolveFrom(fromClause, params);
+      // Try PK point lookup to skip full table scan for WHERE pk = expr
+      const pkScan = this._tryPkPointScan(fromClause, whereClause, evaluator);
+      if (pkScan !== null) {
+        rows = pkScan.rows;
+        uqaApplied = true; // reuse flag to skip WHERE re-evaluation
+        uqaScalarNode = pkScan.remainingWhere;
+      } else {
+        rows = this._resolveFrom(fromClause, params);
+      }
     }
 
     // 2. WHERE clause -- filter rows
@@ -3892,6 +3900,116 @@ export class SQLCompiler {
         if (result) return result;
       }
     }
+    return null;
+  }
+
+  /**
+   * For single-table SELECT with WHERE pk = expr, bypass the full table scan
+   * and do an O(1) document store lookup.  Returns null when the pattern
+   * does not match or the value cannot be resolved.
+   */
+  private _tryPkPointScan(
+    fromClause: Record<string, unknown>[],
+    whereClause: unknown,
+    evaluator: ExprEvaluator,
+  ): { rows: Record<string, unknown>[]; remainingWhere: Record<string, unknown> | null } | null {
+    if (whereClause === null || whereClause === undefined) return null;
+    if (fromClause.length !== 1) return null;
+    const item = fromClause[0]!;
+    const rv = nodeGet(item, "RangeVar");
+    if (rv === null || rv === undefined) return null;
+    const rvObj = asObj(rv);
+    const tableName = qualifiedName(rvObj);
+    const alias = extractAlias(rvObj);
+    const table = this._tables.get(tableName);
+    if (!table || !table.primaryKey) return null;
+    const whereObj = asObj(whereClause);
+    if (SQLCompiler._containsUQAFunction(whereObj)) return null;
+
+    const extracted = SQLCompiler._extractPkEquality(table.primaryKey, whereObj);
+    if (!extracted) return null;
+
+    let pkValue: unknown;
+    try {
+      pkValue = evaluator.evaluate(extracted.valueNode, {});
+    } catch {
+      return null;
+    }
+    if (pkValue === null || pkValue === undefined) {
+      return { rows: [], remainingWhere: null };
+    }
+
+    const docId = typeof pkValue === "number" ? pkValue : null;
+    if (docId === null) return null;
+
+    const doc = table.documentStore.get(docId);
+    if (!doc) return { rows: [], remainingWhere: null };
+
+    const row: Record<string, unknown> = { ...doc };
+    row[table.primaryKey] = pkValue;
+
+    if (extracted.remainingNode) {
+      if (evaluator.evaluate(extracted.remainingNode, row) !== true) {
+        return { rows: [], remainingWhere: null };
+      }
+    }
+    return { rows: this._applyAlias([row], alias ?? tableName), remainingWhere: null };
+  }
+
+  /**
+   * Extract a pk = expr conjunct from a WHERE clause.
+   * Returns the value expression node and any remaining conjuncts.
+   */
+  private static _extractPkEquality(
+    pkCol: string,
+    whereNode: Record<string, unknown>,
+  ): { valueNode: Record<string, unknown>; remainingNode: Record<string, unknown> | null } | null {
+    // Simple A_Expr: pk = expr
+    const aExpr = asObj(nodeGet(whereNode, "A_Expr") ?? {});
+    if (Object.keys(aExpr).length > 0) {
+      const match = SQLCompiler._matchPkEquals(pkCol, aExpr);
+      if (match) return { valueNode: match, remainingNode: null };
+    }
+    // BoolExpr AND containing pk = expr
+    const boolExpr = asObj(nodeGet(whereNode, "BoolExpr") ?? {});
+    if (Object.keys(boolExpr).length > 0) {
+      const boolop = nodeGet(boolExpr, "boolop");
+      if (boolop === 0 || boolop === "AND_EXPR") {
+        const args = asList(nodeGet(boolExpr, "args"));
+        for (let i = 0; i < args.length; i++) {
+          const inner = asObj(nodeGet(args[i]!, "A_Expr") ?? args[i]!);
+          const match = SQLCompiler._matchPkEquals(pkCol, inner);
+          if (match) {
+            const rest = args.filter((_, j) => j !== i);
+            const remainingNode =
+              rest.length === 0
+                ? null
+                : rest.length === 1
+                  ? rest[0]!
+                  : { BoolExpr: { boolop: 0, args: rest } };
+            return { valueNode: match, remainingNode };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private static _matchPkEquals(
+    pkCol: string,
+    aExpr: Record<string, unknown>,
+  ): Record<string, unknown> | null {
+    const nameList = asList(nodeGet(aExpr, "name"));
+    if (nameList.length === 0 || extractString(nameList[0]!) !== "=") return null;
+    const lexpr = nodeGet(aExpr, "lexpr");
+    const rexpr = nodeGet(aExpr, "rexpr");
+    if (!lexpr || !rexpr) return null;
+    const lObj = asObj(lexpr);
+    const rObj = asObj(rexpr);
+    // Only match when the value side is NOT a column reference
+    // (must be a constant, parameter, or subquery).
+    if (isColumnRef(lObj) && extractColumnName(lObj) === pkCol && !isColumnRef(rObj)) return rObj;
+    if (isColumnRef(rObj) && extractColumnName(rObj) === pkCol && !isColumnRef(lObj)) return lObj;
     return null;
   }
 
