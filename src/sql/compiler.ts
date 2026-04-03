@@ -3010,16 +3010,23 @@ export class SQLCompiler {
     const planLines: string[] = [];
 
     if (isJoin) {
-      // Determine join type
-      let joinLabel = "Hash Join";
+      // Determine join strategy from join type and ON condition
+      let joinLabel = "Nested Loop";
       if (fromClause.length === 1) {
         const je = nodeGet(fromClause[0]!, "JoinExpr");
         if (je !== null && je !== undefined) {
-          const jt = nodeGet(asObj(je), "jointype");
-          if (jt === 1 || jt === "JOIN_LEFT") joinLabel = "Hash Left Join";
-          else if (jt === 3 || jt === "JOIN_RIGHT") joinLabel = "Hash Right Join";
-          else if (jt === 2 || jt === "JOIN_FULL") joinLabel = "Hash Full Join";
-          else if (jt === 5 || jt === "JOIN_CROSS") joinLabel = "Nested Loop";
+          const jeObj = asObj(je);
+          const jt = nodeGet(jeObj, "jointype");
+          const onQuals = nodeGet(jeObj, "quals");
+          const isEqui = SQLCompiler._extractEquiJoinKeys(onQuals) !== null;
+          if (jt === 5 || jt === "JOIN_CROSS") {
+            joinLabel = "Nested Loop";
+          } else if (isEqui) {
+            if (jt === 1 || jt === "JOIN_LEFT") joinLabel = "Hash Left Join";
+            else if (jt === 3 || jt === "JOIN_RIGHT") joinLabel = "Hash Right Join";
+            else if (jt === 2 || jt === "JOIN_FULL") joinLabel = "Hash Full Join";
+            else joinLabel = "Hash Join";
+          }
         }
       }
       planLines.push(joinLabel);
@@ -4497,11 +4504,25 @@ export class SQLCompiler {
       return this._crossJoin(leftRows, rightRows);
     }
 
-    const result: Record<string, unknown>[] = [];
     const isLeftJoin = joinType === 1 || joinType === "JOIN_LEFT";
     const isRightJoin = joinType === 3 || joinType === "JOIN_RIGHT";
     const isFullJoin = joinType === 2 || joinType === "JOIN_FULL";
 
+    // Try O(n+m) hash join for equi-join conditions
+    const equiKeys = SQLCompiler._extractEquiJoinKeys(quals);
+    if (equiKeys) {
+      return SQLCompiler._hashJoin(
+        leftRows,
+        rightRows,
+        equiKeys,
+        isLeftJoin,
+        isRightJoin,
+        isFullJoin,
+      );
+    }
+
+    // Fallback: nested loop for non-equi or complex ON conditions
+    const result: Record<string, unknown>[] = [];
     const rightMatched = new Set<number>();
 
     for (const lRow of leftRows) {
@@ -4542,9 +4563,142 @@ export class SQLCompiler {
               merged[key] = null;
             }
           }
-          // Right row values override nulls for their own columns
           for (const [key, val] of Object.entries(rightRows[ri]!)) {
             merged[key] = val;
+          }
+          result.push(merged);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Extract equi-join key columns from an ON clause.
+   * Returns null if the condition is not a pure equi-join.
+   */
+  private static _extractEquiJoinKeys(
+    quals: unknown,
+  ): { leftCols: string[]; rightCols: string[] } | null {
+    if (quals === null || quals === undefined) return null;
+    const q = asObj(quals);
+    // Single equality: A_Expr =
+    const aExpr = asObj(nodeGet(q, "A_Expr") ?? {});
+    if (Object.keys(aExpr).length > 0) {
+      return SQLCompiler._extractOneEquality(aExpr);
+    }
+    // Direct A_Expr (unwrapped)
+    if (nodeGet(q, "name") !== null) {
+      return SQLCompiler._extractOneEquality(q);
+    }
+    // BoolExpr AND of equalities
+    const boolExpr = asObj(nodeGet(q, "BoolExpr") ?? {});
+    if (Object.keys(boolExpr).length > 0) {
+      const boolop = nodeGet(boolExpr, "boolop");
+      if (boolop !== 0 && boolop !== "AND_EXPR") return null;
+      const args = asList(nodeGet(boolExpr, "args"));
+      const leftCols: string[] = [];
+      const rightCols: string[] = [];
+      for (const arg of args) {
+        const inner = asObj(nodeGet(arg, "A_Expr") ?? arg);
+        const pair = SQLCompiler._extractOneEquality(inner);
+        if (!pair) return null;
+        leftCols.push(pair.leftCols[0]!);
+        rightCols.push(pair.rightCols[0]!);
+      }
+      if (leftCols.length > 0) return { leftCols, rightCols };
+    }
+    return null;
+  }
+
+  private static _extractOneEquality(
+    aExpr: Record<string, unknown>,
+  ): { leftCols: string[]; rightCols: string[] } | null {
+    const nameList = asList(nodeGet(aExpr, "name"));
+    if (nameList.length === 0 || extractString(nameList[0]!) !== "=") return null;
+    const lexpr = nodeGet(aExpr, "lexpr");
+    const rexpr = nodeGet(aExpr, "rexpr");
+    if (!lexpr || !rexpr) return null;
+    if (!isColumnRef(asObj(lexpr)) || !isColumnRef(asObj(rexpr))) return null;
+    const left = extractQualifiedColumnName(asObj(lexpr));
+    const right = extractQualifiedColumnName(asObj(rexpr));
+    return { leftCols: [left], rightCols: [right] };
+  }
+
+  /**
+   * O(n+m) hash join for equi-join conditions.
+   * Supports INNER, LEFT, RIGHT, and FULL joins.
+   */
+  private static _hashJoin(
+    leftRows: Record<string, unknown>[],
+    rightRows: Record<string, unknown>[],
+    keys: { leftCols: string[]; rightCols: string[] },
+    isLeftJoin: boolean,
+    isRightJoin: boolean,
+    isFullJoin: boolean,
+  ): Record<string, unknown>[] {
+    // keys.leftCols / rightCols are the left/right of the "=" operator,
+    // which may not correspond to the left/right of the JOIN.
+    // Determine which key set belongs to which side by checking the rows.
+    let probeCols = keys.leftCols;
+    let buildCols = keys.rightCols;
+    const lSample = leftRows.length > 0 ? leftRows[0]! : {};
+    if (!(probeCols[0]! in lSample) && buildCols[0]! in lSample) {
+      probeCols = keys.rightCols;
+      buildCols = keys.leftCols;
+    }
+
+    // Build hash table on the right side using buildCols
+    const hashMap = new Map<string, number[]>();
+    for (let ri = 0; ri < rightRows.length; ri++) {
+      const rRow = rightRows[ri]!;
+      const key = buildCols.map((c) => String(rRow[c] ?? "\0NULL")).join("\0");
+      let bucket = hashMap.get(key);
+      if (!bucket) {
+        bucket = [];
+        hashMap.set(key, bucket);
+      }
+      bucket.push(ri);
+    }
+
+    const result: Record<string, unknown>[] = [];
+    const rightMatched = new Set<number>();
+
+    for (const lRow of leftRows) {
+      const key = probeCols
+        .map((c) => String(lRow[c] ?? "\0NULL"))
+        .join("\0");
+      const bucket = hashMap.get(key);
+      if (bucket) {
+        for (const ri of bucket) {
+          result.push({ ...lRow, ...rightRows[ri]! });
+          rightMatched.add(ri);
+        }
+      } else if (isLeftJoin || isFullJoin) {
+        const merged: Record<string, unknown> = { ...lRow };
+        if (rightRows.length > 0) {
+          for (const k of Object.keys(rightRows[0]!)) {
+            if (!(k in merged)) {
+              merged[k] = null;
+            }
+          }
+        }
+        result.push(merged);
+      }
+    }
+
+    if (isRightJoin || isFullJoin) {
+      for (let ri = 0; ri < rightRows.length; ri++) {
+        if (!rightMatched.has(ri)) {
+          const merged: Record<string, unknown> = {};
+          if (leftRows.length > 0) {
+            for (const k of Object.keys(leftRows[0]!)) {
+              merged[k] = null;
+            }
+          }
+          for (const [k, val] of Object.entries(rightRows[ri]!)) {
+            merged[k] = val;
           }
           result.push(merged);
         }

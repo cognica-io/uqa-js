@@ -1,5 +1,16 @@
 # History
 
+## 0.3.4 (2026-04-03)
+
+Hash join for equi-join conditions and EXPLAIN improvements.
+
+### Features
+- **Hash join for equi-join conditions**: `_resolveJoin()` now detects equi-join ON conditions (single `=` or AND of `=` with ColumnRef on both sides) and uses an O(n+m) hash join instead of the O(n*m) nested loop. The hash table is built on the right side and probed by the left side, with automatic detection of which equality operand belongs to which side of the JOIN. Supports INNER, LEFT, RIGHT, and FULL joins. Non-equi conditions (e.g., `ON a.x > b.y`) fall back to the nested loop.
+- **EXPLAIN reports scan strategy**: `EXPLAIN SELECT` now inspects the WHERE clause for UQA posting-list functions and the FROM clause for JoinExpr structure. Reports `GIN Index Scan using {function}` for tables with UQA WHERE functions, `Hash Join` / `Hash Left Join` for equi-join conditions, and `Nested Loop` for non-equi or cross joins.
+
+### Tests
+- 2,947 tests across 111 test files
+
 ## 0.3.3 (2026-04-03)
 
 UQA posting-list scan pushed below JOIN for index-driven performance.
