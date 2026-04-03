@@ -216,6 +216,18 @@ const result = await engine.sql(`
   ORDER BY e.salary DESC
 `);
 
+// Multi-signal fusion across JOINed tables
+const result = await engine.sql(`
+  SELECT r.id, r.name, h.name AS hotel_name, _score
+  FROM rooms r
+  JOIN hotels h ON r.hotel_id = h.id
+  WHERE fuse_log_odds(
+    bayesian_match(r.name, 'ocean'),
+    bayesian_match(r.description, 'ocean view')
+  )
+  ORDER BY _score DESC
+`);
+
 // Window functions
 const result = await engine.sql(`
   SELECT rep, sale_date, amount,
@@ -539,7 +551,7 @@ src/
   sql/            SQL compiler (libpg-query WASM), expression evaluator, FTS query parser,
                   table DDL/DML, FDW dispatch
   api/            Fluent QueryBuilder
-tests/            2,943 tests across 111 test files
+tests/            2,947 tests across 111 test files
 ```
 
 ## SQL Reference
@@ -913,7 +925,7 @@ npx vitest run tests/test_sql.test.ts
 npm run test:watch
 ```
 
-2,943 tests across 111 test files covering:
+2,947 tests across 111 test files covering:
 
 - Boolean algebra axioms verified with 100 random trials each
 - De Morgan's laws, sorted invariants

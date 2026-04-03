@@ -1,5 +1,16 @@
 # History
 
+## 0.3.2 (2026-04-03)
+
+UQA WHERE functions (fusion, scoring, retrieval) now work correctly in JOIN queries.
+
+### Fixes
+- **UQA WHERE functions with JOIN**: `fuse_log_odds`, `fuse_prob_and`, `fuse_prob_or`, `fuse_attention`, `fuse_learned`, `bayesian_match`, `knn_match`, `staged_retrieval`, `progressive_fusion`, `deep_fusion`, and all other posting-list WHERE functions now work in queries that include `JOIN`. Previously, `_resolveFromTableName()` returned `null` for `JoinExpr` FROM clauses, causing UQA functions to fall through to the generic expression evaluator which threw `Unknown SQL function`. The fix adds alias-to-table resolution for JoinExpr trees and a JOIN-aware scoring path that filters and enriches joined rows via a posting-list score map, instead of replacing the row source entirely.
+
+### Tests
+- 2,947 tests across 111 test files
+- Added 4 tests in `tests/sql/uqa-functions.test.ts` covering `fuse_log_odds` with INNER JOIN, `bayesian_match` with INNER JOIN, `fuse_prob_or` with LEFT JOIN, and single-table regression check
+
 ## 0.3.1 (2026-04-02)
 
 SQLite persistence lifecycle: save, load, and restore engine state from disk.

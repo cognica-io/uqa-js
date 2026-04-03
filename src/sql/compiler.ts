@@ -3133,7 +3133,19 @@ export class SQLCompiler {
       const whereObj = asObj(whereClause);
       if (SQLCompiler._containsUQAFunction(whereObj)) {
         // UQA posting-list path
-        const tableName = this._resolveFromTableName(fromClause);
+        let tableName = this._resolveFromTableName(fromClause);
+        let tableAlias: string | null = null;
+
+        if (!tableName) {
+          // JOIN case: resolve the target table from UQA column references
+          const aliasMap = this._collectFromAliases(fromClause);
+          const colAlias = SQLCompiler._extractUQAColumnAlias(whereObj);
+          if (colAlias && aliasMap.has(colAlias)) {
+            tableName = aliasMap.get(colAlias)!;
+            tableAlias = colAlias;
+          }
+        }
+
         if (tableName) {
           const table = this._tables.get(tableName);
           if (table) {
@@ -3145,19 +3157,39 @@ export class SQLCompiler {
             }
             if (op) {
               const pl = op.execute(ctx);
-              // Build rows from posting list + document store
-              const newRows: Record<string, unknown>[] = [];
-              const ds = table.documentStore;
-              const pkCol = table.primaryKey;
-              for (const entry of pl) {
-                const doc = ds.get(entry.docId);
-                if (!doc) continue;
-                const row: Record<string, unknown> = { ...doc, _score: entry.payload.score };
-                if (pkCol) row[pkCol] = entry.docId;
-                row["_doc_id"] = entry.docId;
-                newRows.push(row);
+
+              if (tableAlias !== null) {
+                // JOIN path: filter and score the already-joined rows
+                const scoreMap = new Map<unknown, number>();
+                for (const entry of pl) {
+                  scoreMap.set(entry.docId, entry.payload.score);
+                }
+                const pkCol = table.primaryKey;
+                const aliasedPk = pkCol ? `${tableAlias}.${pkCol}` : null;
+                rows = rows.filter((row) => {
+                  const pkValue = aliasedPk !== null ? row[aliasedPk] : undefined;
+                  if (pkValue !== undefined && scoreMap.has(pkValue)) {
+                    row["_score"] = scoreMap.get(pkValue);
+                    return true;
+                  }
+                  return false;
+                });
+              } else {
+                // Single-table path: build rows from posting list
+                const newRows: Record<string, unknown>[] = [];
+                const ds = table.documentStore;
+                const pkCol = table.primaryKey;
+                for (const entry of pl) {
+                  const doc = ds.get(entry.docId);
+                  if (!doc) continue;
+                  const row: Record<string, unknown> = { ...doc, _score: entry.payload.score };
+                  if (pkCol) row[pkCol] = entry.docId;
+                  row["_doc_id"] = entry.docId;
+                  newRows.push(row);
+                }
+                rows = newRows;
               }
-              rows = newRows;
+
               // Apply remaining scalar predicates
               if (scalarNode) {
                 rows = rows.filter((row) => {
@@ -3669,6 +3701,78 @@ export class SQLCompiler {
     const item = fromClause[0]!;
     const rv = item["RangeVar"] as Record<string, unknown> | undefined;
     if (rv) return (rv["relname"] as string) ?? null;
+    return null;
+  }
+
+  /**
+   * Build a map from table alias (or table name) to actual table name
+   * by traversing the FROM clause, including JoinExpr trees.
+   */
+  private _collectFromAliases(fromClause: Record<string, unknown>[]): Map<string, string> {
+    const aliasMap = new Map<string, string>();
+    for (const item of fromClause) {
+      this._collectFromAliasesFromItem(item, aliasMap);
+    }
+    return aliasMap;
+  }
+
+  private _collectFromAliasesFromItem(
+    node: Record<string, unknown>,
+    aliasMap: Map<string, string>,
+  ): void {
+    const rv = nodeGet(node, "RangeVar");
+    if (rv !== null && rv !== undefined) {
+      const rvObj = asObj(rv);
+      const tableName = qualifiedName(rvObj);
+      const alias = extractAlias(rvObj);
+      if (alias) {
+        aliasMap.set(alias, tableName);
+      }
+      aliasMap.set(tableName, tableName);
+      return;
+    }
+    const joinExpr = nodeGet(node, "JoinExpr");
+    if (joinExpr !== null && joinExpr !== undefined) {
+      const je = asObj(joinExpr);
+      this._collectFromAliasesFromItem(asObj(nodeGet(je, "larg")), aliasMap);
+      this._collectFromAliasesFromItem(asObj(nodeGet(je, "rarg")), aliasMap);
+    }
+  }
+
+  /**
+   * Extract the table alias from the first qualified ColumnRef
+   * found within a UQA function subtree.  Returns null when all
+   * column references are unqualified.
+   */
+  private static _extractUQAColumnAlias(node: Record<string, unknown>): string | null {
+    const colRef = nodeGet(node, "ColumnRef");
+    if (colRef !== null && colRef !== undefined) {
+      const crObj = asObj(colRef);
+      const fields = asList(nodeGet(crObj, "fields"));
+      if (fields.length >= 2) {
+        const alias = extractString(fields[0]!);
+        if (alias) return alias;
+      }
+    }
+    for (const key of Object.keys(node)) {
+      const val = node[key];
+      if (val === null || val === undefined) continue;
+      if (Array.isArray(val)) {
+        for (const item of val) {
+          if (typeof item === "object" && item !== null) {
+            const result = SQLCompiler._extractUQAColumnAlias(
+              item as Record<string, unknown>,
+            );
+            if (result) return result;
+          }
+        }
+      } else if (typeof val === "object") {
+        const result = SQLCompiler._extractUQAColumnAlias(
+          val as Record<string, unknown>,
+        );
+        if (result) return result;
+      }
+    }
     return null;
   }
 
