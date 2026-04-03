@@ -720,6 +720,11 @@ export class SQLCompiler {
     string,
     { name: string; tableName: string; method: string; columns: string[] }
   >;
+  private _uqaFromFilter: {
+    tableName: string;
+    scores: Map<unknown, number>;
+    pkCol: string | null;
+  } | null;
 
   constructor(engine?: unknown) {
     // Use engine's table store if available (supports schema namespaces)
@@ -739,6 +744,7 @@ export class SQLCompiler {
     this._foreignTables = new Map();
     this._fdwHandlers = new Map();
     this._indexes = new Map();
+    this._uqaFromFilter = null;
   }
 
   /**
@@ -3120,32 +3126,78 @@ export class SQLCompiler {
     });
 
     // 1. FROM clause -- get source rows
+    //    When UQA functions appear in WHERE with a JOIN, push the posting-list
+    //    scan below the join so only matching rows enter the join.
     let rows: Record<string, unknown>[];
+    let uqaApplied = false;
+    let uqaScalarNode: Record<string, unknown> | null = null;
+
     if (fromClause.length === 0) {
       // SELECT without FROM (e.g. SELECT 1+1)
       rows = [{}];
+    } else if (
+      whereClause !== null &&
+      whereClause !== undefined &&
+      !this._resolveFromTableName(fromClause)
+    ) {
+      // Multi-table FROM (JOIN): try to push UQA scan below the join
+      const whereObj = asObj(whereClause);
+      if (SQLCompiler._containsUQAFunction(whereObj)) {
+        const aliasMap = this._collectFromAliases(fromClause);
+        const colAlias = SQLCompiler._extractUQAColumnAlias(whereObj);
+        const targetName = colAlias ? aliasMap.get(colAlias) : undefined;
+        const table = targetName ? this._tables.get(targetName) : undefined;
+        if (table && targetName) {
+          const ctx = this._contextForTable(table);
+          const [uqaNode, scalarNode] = this._splitUQAConjuncts(whereObj);
+          let op: Operator | null = null;
+          if (uqaNode) {
+            op = this._compileWhere(uqaNode, ctx);
+          }
+          if (op) {
+            const pl = op.execute(ctx);
+            const scores = new Map<unknown, number>();
+            for (const entry of pl) {
+              scores.set(entry.docId, entry.payload.score);
+            }
+            // Activate filter so _resolveFromItem only emits matching docs
+            const savedFilter = this._uqaFromFilter;
+            this._uqaFromFilter = {
+              tableName: targetName,
+              scores,
+              pkCol: table.primaryKey,
+            };
+            rows = this._resolveFrom(fromClause, params);
+            this._uqaFromFilter = savedFilter;
+            uqaApplied = true;
+            uqaScalarNode = scalarNode;
+          } else {
+            rows = this._resolveFrom(fromClause, params);
+          }
+        } else {
+          rows = this._resolveFrom(fromClause, params);
+        }
+      } else {
+        rows = this._resolveFrom(fromClause, params);
+      }
     } else {
       rows = this._resolveFrom(fromClause, params);
     }
 
     // 2. WHERE clause -- filter rows
-    if (whereClause !== null && whereClause !== undefined) {
+    if (uqaApplied) {
+      // UQA already applied during FROM (JOIN pushdown); only scalar remains
+      if (uqaScalarNode) {
+        rows = rows.filter((row) => {
+          const result = evaluator.evaluate(asObj(uqaScalarNode!), row);
+          return result === true;
+        });
+      }
+    } else if (whereClause !== null && whereClause !== undefined) {
       const whereObj = asObj(whereClause);
       if (SQLCompiler._containsUQAFunction(whereObj)) {
-        // UQA posting-list path
-        let tableName = this._resolveFromTableName(fromClause);
-        let tableAlias: string | null = null;
-
-        if (!tableName) {
-          // JOIN case: resolve the target table from UQA column references
-          const aliasMap = this._collectFromAliases(fromClause);
-          const colAlias = SQLCompiler._extractUQAColumnAlias(whereObj);
-          if (colAlias && aliasMap.has(colAlias)) {
-            tableName = aliasMap.get(colAlias)!;
-            tableAlias = colAlias;
-          }
-        }
-
+        // UQA posting-list path (single-table)
+        const tableName = this._resolveFromTableName(fromClause);
         if (tableName) {
           const table = this._tables.get(tableName);
           if (table) {
@@ -3157,40 +3209,18 @@ export class SQLCompiler {
             }
             if (op) {
               const pl = op.execute(ctx);
-
-              if (tableAlias !== null) {
-                // JOIN path: filter and score the already-joined rows
-                const scoreMap = new Map<unknown, number>();
-                for (const entry of pl) {
-                  scoreMap.set(entry.docId, entry.payload.score);
-                }
-                const pkCol = table.primaryKey;
-                const aliasedPk = pkCol ? `${tableAlias}.${pkCol}` : null;
-                rows = rows.filter((row) => {
-                  const pkValue = aliasedPk !== null ? row[aliasedPk] : undefined;
-                  if (pkValue !== undefined && scoreMap.has(pkValue)) {
-                    row["_score"] = scoreMap.get(pkValue);
-                    return true;
-                  }
-                  return false;
-                });
-              } else {
-                // Single-table path: build rows from posting list
-                const newRows: Record<string, unknown>[] = [];
-                const ds = table.documentStore;
-                const pkCol = table.primaryKey;
-                for (const entry of pl) {
-                  const doc = ds.get(entry.docId);
-                  if (!doc) continue;
-                  const row: Record<string, unknown> = { ...doc, _score: entry.payload.score };
-                  if (pkCol) row[pkCol] = entry.docId;
-                  row["_doc_id"] = entry.docId;
-                  newRows.push(row);
-                }
-                rows = newRows;
+              const newRows: Record<string, unknown>[] = [];
+              const ds = table.documentStore;
+              const pkCol = table.primaryKey;
+              for (const entry of pl) {
+                const doc = ds.get(entry.docId);
+                if (!doc) continue;
+                const row: Record<string, unknown> = { ...doc, _score: entry.payload.score };
+                if (pkCol) row[pkCol] = entry.docId;
+                row["_doc_id"] = entry.docId;
+                newRows.push(row);
               }
-
-              // Apply remaining scalar predicates
+              rows = newRows;
               if (scalarNode) {
                 rows = rows.filter((row) => {
                   const result = evaluator.evaluate(asObj(scalarNode), row);
@@ -3860,6 +3890,20 @@ export class SQLCompiler {
       const table = this._tables.get(tableName);
       if (!table) {
         throw new Error(`Table "${tableName}" does not exist`);
+      }
+
+      // UQA pre-filter: emit only posting-list matches when active
+      if (this._uqaFromFilter && tableName === this._uqaFromFilter.tableName) {
+        const { scores, pkCol } = this._uqaFromFilter;
+        const filtered: Record<string, unknown>[] = [];
+        for (const [docId, score] of scores) {
+          const doc = table.documentStore.get(docId as number);
+          if (!doc) continue;
+          const row: Record<string, unknown> = { ...doc, _score: score };
+          if (pkCol) row[pkCol] = docId;
+          filtered.push(row);
+        }
+        return this._applyAlias(filtered, alias ?? tableName);
       }
 
       const rows: Record<string, unknown>[] = [];
