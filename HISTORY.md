@@ -1,5 +1,16 @@
 # History
 
+## 0.3.6 (2026-04-04)
+
+Register `bayesian_match_with_prior` as a calibrated signal for fusion operators.
+
+### Fixes
+- **`bayesian_match_with_prior` in fusion operators**: `bayesian_match_with_prior()` can now be used as a signal inside `fuse_attention()`, `fuse_multihead()`, and `fuse_learned()`. Previously, the calibrated signal dispatcher (`_compileCalibratedSignal`) did not recognize `bayesian_match_with_prior`, causing an "Unknown signal function for fusion" error when composing it with other signals in any fusion meta-function. The function already produced calibrated (0, 1) output via `ExternalPriorScorer`, so this was purely a registration gap.
+
+### Tests
+- 2,952 tests across 111 test files
+- Added 5 tests in `tests/sql/uqa-functions.test.ts` covering `bayesian_match_with_prior` as a calibrated signal in `fuse_attention` (recency and authority modes), `fuse_multihead`, `fuse_learned`, and dual `bayesian_match_with_prior` signal fusion
+
 ## 0.3.5 (2026-04-03)
 
 Primary key point lookup for O(1) single-row access.

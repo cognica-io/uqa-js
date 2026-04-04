@@ -551,7 +551,7 @@ src/
   sql/            SQL compiler (libpg-query WASM), expression evaluator, FTS query parser,
                   table DDL/DML, FDW dispatch
   api/            Fluent QueryBuilder
-tests/            2,947 tests across 111 test files
+tests/            2,952 tests across 111 test files
 ```
 
 ## SQL Reference
@@ -925,7 +925,7 @@ npx vitest run tests/test_sql.test.ts
 npm run test:watch
 ```
 
-2,947 tests across 111 test files covering:
+2,952 tests across 111 test files covering:
 
 - Boolean algebra axioms verified with 100 random trials each
 - De Morgan's laws, sorted invariants

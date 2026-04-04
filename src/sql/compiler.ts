@@ -7300,10 +7300,14 @@ export class SQLCompiler {
     if (name === "message_passing") {
       return this._makeMessagePassingOp(args);
     }
+    if (name === "bayesian_match_with_prior") {
+      return this._makeBayesianWithPriorOp(args, ctx);
+    }
     throw new Error(
       `Unknown signal function for fusion: ${name}. ` +
-        `Use text_match, bayesian_match, knn_match, bayesian_knn_match, ` +
-        `traverse_match, spatial_within, pagerank, hits, betweenness, or weighted_rpq.`,
+        `Use text_match, bayesian_match, bayesian_match_with_prior, knn_match, ` +
+        `bayesian_knn_match, traverse_match, spatial_within, pagerank, hits, ` +
+        `betweenness, weighted_rpq, or message_passing.`,
     );
   }
 

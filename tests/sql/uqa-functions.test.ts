@@ -176,6 +176,132 @@ describe("UQA functions with JOIN", () => {
   });
 });
 
+describe("bayesian_match_with_prior as calibrated signal in fusion", () => {
+  async function makePriorEngine(): Promise<Engine> {
+    const e = new Engine();
+    await e.sql(
+      "CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT, body TEXT, updated_at TEXT, authority TEXT)",
+    );
+    await e.sql("CREATE INDEX idx_articles_fts ON articles USING gin (title, body)");
+    const now = new Date().toISOString();
+    const old = new Date(Date.now() - 365 * 86400000).toISOString();
+    e.insert("articles", 1, {
+      title: "machine learning basics",
+      body: "algorithms for ML research",
+      updated_at: now,
+      authority: "high",
+    });
+    e.insert("articles", 2, {
+      title: "deep learning neural networks",
+      body: "CNN and RNN models for learning",
+      updated_at: old,
+      authority: "low",
+    });
+    e.insert("articles", 3, {
+      title: "cooking recipes",
+      body: "pasta and pizza",
+      updated_at: now,
+      authority: "medium",
+    });
+    return e;
+  }
+
+  it("fuse_attention with bayesian_match_with_prior (recency)", async () => {
+    const e = await makePriorEngine();
+    const r = await e.sql(`
+      SELECT id, _score FROM articles
+      WHERE fuse_attention(
+        bayesian_match_with_prior(title, 'learning', 'updated_at', 'recency'),
+        bayesian_match(body, 'learning')
+      )
+      ORDER BY _score DESC
+    `);
+    expect(r).not.toBeNull();
+    expect(r!.rows.length).toBeGreaterThan(0);
+    for (const row of r!.rows) {
+      expect(row["_score"]).toBeTypeOf("number");
+      expect(row["_score"] as number).toBeGreaterThan(0);
+      expect(row["_score"] as number).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("fuse_attention with bayesian_match_with_prior (authority)", async () => {
+    const e = await makePriorEngine();
+    const r = await e.sql(`
+      SELECT id, _score FROM articles
+      WHERE fuse_attention(
+        bayesian_match_with_prior(title, 'learning', 'authority', 'authority'),
+        bayesian_match(body, 'algorithms')
+      )
+      ORDER BY _score DESC
+    `);
+    expect(r).not.toBeNull();
+    expect(r!.rows.length).toBeGreaterThan(0);
+    for (const row of r!.rows) {
+      expect(row["_score"]).toBeTypeOf("number");
+      expect(row["_score"] as number).toBeGreaterThan(0);
+      expect(row["_score"] as number).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("fuse_multihead with bayesian_match_with_prior", async () => {
+    const e = await makePriorEngine();
+    const r = await e.sql(`
+      SELECT id, _score FROM articles
+      WHERE fuse_multihead(
+        bayesian_match_with_prior(title, 'learning', 'updated_at', 'recency'),
+        bayesian_match(body, 'learning')
+      )
+      ORDER BY _score DESC
+    `);
+    expect(r).not.toBeNull();
+    expect(r!.rows.length).toBeGreaterThan(0);
+    for (const row of r!.rows) {
+      expect(row["_score"]).toBeTypeOf("number");
+      expect(row["_score"] as number).toBeGreaterThan(0);
+      expect(row["_score"] as number).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("fuse_learned with bayesian_match_with_prior", async () => {
+    const e = await makePriorEngine();
+    const r = await e.sql(`
+      SELECT id, _score FROM articles
+      WHERE fuse_learned(
+        bayesian_match_with_prior(title, 'learning', 'authority', 'authority'),
+        bayesian_match(body, 'learning')
+      )
+      ORDER BY _score DESC
+    `);
+    expect(r).not.toBeNull();
+    expect(r!.rows.length).toBeGreaterThan(0);
+    for (const row of r!.rows) {
+      expect(row["_score"]).toBeTypeOf("number");
+      expect(row["_score"] as number).toBeGreaterThan(0);
+      expect(row["_score"] as number).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("fuse_attention with two bayesian_match_with_prior signals", async () => {
+    const e = await makePriorEngine();
+    const r = await e.sql(`
+      SELECT id, _score FROM articles
+      WHERE fuse_attention(
+        bayesian_match_with_prior(title, 'learning', 'updated_at', 'recency'),
+        bayesian_match_with_prior(body, 'learning', 'authority', 'authority')
+      )
+      ORDER BY _score DESC
+    `);
+    expect(r).not.toBeNull();
+    expect(r!.rows.length).toBeGreaterThan(0);
+    for (const row of r!.rows) {
+      expect(row["_score"]).toBeTypeOf("number");
+      expect(row["_score"] as number).toBeGreaterThan(0);
+      expect(row["_score"] as number).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
 describe("set_table_analyzer via SQL", () => {
   it("applies CJK analyzer and enables prefix search", async () => {
     const e = new Engine();
