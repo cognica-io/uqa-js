@@ -45,6 +45,7 @@ export class InnerJoinOperator extends JoinOperator {
       bucket.push(entry);
     }
 
+    this.checkCancelled();
     const result: GeneralizedPostingEntry[] = [];
     for (const probeEntry of probeEntries) {
       const probeKey = (probeEntry.payload.fields as Record<string, unknown>)[

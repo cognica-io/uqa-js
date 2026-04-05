@@ -1,5 +1,15 @@
 # History
 
+## 0.3.7 (2026-04-05)
+
+Query cancellation mechanism for in-flight queries.
+
+### Features
+- **Query cancellation**: New `CancellationToken` class and `QueryCancelled` error (`src/cancel.ts`) provide cooperative cancellation for long-running queries. `Engine.cancel()` triggers cancellation; `Engine.cancelToken` exposes the token for external coordination. `PhysicalOperator` base class gains `cancelToken`, `checkCancelled()`, and `propagateCancelToken()`. `JoinOperator` and `CrossJoinOperator` gain `cancelToken` and `checkCancelled()`. Operators check cancellation in hot loops: SeqScan, PostingListScan, Filter, ExprFilter, Sort, HashAgg, Distinct, Window, InnerJoin, CrossJoin, LeftOuterJoin, FullOuterJoin. SQLCompiler propagates cancel tokens to operator trees before execution. `QueryCancelled` and `CancellationToken` are exported from the package index.
+
+### Tests
+- 2,952 tests across 111 test files
+
 ## 0.3.6 (2026-04-04)
 
 Register `bayesian_match_with_prior` as a calibrated signal for fusion operators.

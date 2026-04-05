@@ -100,6 +100,7 @@ export class FilterOp extends PhysicalOperator {
 
   next(): Batch | null {
     for (;;) {
+      this.checkCancelled();
       const batch = this._child.next();
       if (batch === null) return null;
       const rows = batch.toRows();
@@ -142,6 +143,7 @@ export class ExprFilterOp extends PhysicalOperator {
 
   next(): Batch | null {
     for (;;) {
+      this.checkCancelled();
       const batch = this._child.next();
       if (batch === null) return null;
       const rows = batch.toRows();
@@ -351,8 +353,15 @@ export class SortOp extends PhysicalOperator {
       this._sorted = this._externalMergeSort();
     } else {
       // In-memory sort
-      const rows = drainToRows(this._child);
+      const rows: Record<string, unknown>[] = [];
+      for (;;) {
+        this.checkCancelled();
+        const batch = this._child.next();
+        if (batch === null) break;
+        for (const row of batch.toRows()) rows.push(row);
+      }
       this._child.close();
+      this.checkCancelled();
       SortOp._sortRows(rows, this._sortKeys);
       this._sorted = rows;
     }
@@ -373,6 +382,7 @@ export class SortOp extends PhysicalOperator {
     const runIndices: number[] = [];
 
     for (;;) {
+      this.checkCancelled();
       const batch = this._child.next();
       if (batch === null) break;
       for (const row of batch.toRows()) {
@@ -411,6 +421,7 @@ export class SortOp extends PhysicalOperator {
   }
 
   next(): Batch | null {
+    this.checkCancelled();
     if (this._sorted === null || this._index >= this._sorted.length) return null;
     const end = Math.min(this._index + this._batchSize, this._sorted.length);
     const slice = this._sorted.slice(this._index, end);
@@ -581,7 +592,13 @@ export class HashAggOp extends PhysicalOperator {
     const hasFilter = this._aggSpecs.some((s) => s.filterNode != null);
     if (hasFilter) this._filterEvaluator = new ExprEvaluator();
 
-    const rows = drainToRows(this._child);
+    const rows: Record<string, unknown>[] = [];
+    for (;;) {
+      this.checkCancelled();
+      const batch = this._child.next();
+      if (batch === null) break;
+      for (const row of batch.toRows()) rows.push(row);
+    }
     this._child.close();
 
     // If spill threshold is set and data exceeds it, use partition-based strategy
@@ -845,6 +862,7 @@ export class HashAggOp extends PhysicalOperator {
   }
 
   next(): Batch | null {
+    this.checkCancelled();
     if (this._result === null || this._index >= this._result.length) return null;
     const end = Math.min(this._index + this._batchSize, this._result.length);
     const slice = this._result.slice(this._index, end);
@@ -887,6 +905,7 @@ export class DistinctOp extends PhysicalOperator {
 
   next(): Batch | null {
     for (;;) {
+      this.checkCancelled();
       const batch = this._child.next();
       if (batch === null) return null;
       const rows = batch.toRows();
@@ -971,7 +990,13 @@ export class WindowOp extends PhysicalOperator {
 
   open(): void {
     this._child.open();
-    const allRows = drainToRows(this._child);
+    const allRows: Record<string, unknown>[] = [];
+    for (;;) {
+      this.checkCancelled();
+      const batch = this._child.next();
+      if (batch === null) break;
+      for (const row of batch.toRows()) allRows.push(row);
+    }
     this._child.close();
 
     for (const spec of this._windowSpecs) {

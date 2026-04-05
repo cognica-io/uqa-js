@@ -10,6 +10,7 @@
 // Unified Query Algebra -- Volcano-model physical operator base
 // 1:1 port of uqa/execution/physical.py
 
+import type { CancellationToken } from "../cancel.js";
 import type { Batch } from "./batch.js";
 
 /**
@@ -21,6 +22,22 @@ import type { Batch } from "./batch.js";
  * - `close()` releases resources.
  */
 export abstract class PhysicalOperator {
+  cancelToken: CancellationToken | null = null;
+
+  checkCancelled(): void {
+    if (this.cancelToken !== null) {
+      this.cancelToken.check();
+    }
+  }
+
+  propagateCancelToken(token: CancellationToken): void {
+    this.cancelToken = token;
+    const child = (this as unknown as { _child?: PhysicalOperator })._child;
+    if (child instanceof PhysicalOperator) {
+      child.propagateCancelToken(token);
+    }
+  }
+
   /** Initialize the operator and its children. */
   abstract open(): void;
 

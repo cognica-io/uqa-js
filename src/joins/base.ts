@@ -10,6 +10,7 @@
 // Unified Query Algebra -- join base types
 // 1:1 port of uqa/joins/base.py
 
+import type { CancellationToken } from "../cancel.js";
 import type { DocId, GeneralizedPostingEntry, PostingEntry } from "../core/types.js";
 import type { GeneralizedPostingList } from "../core/posting-list.js";
 import type { ExecutionContext } from "../operators/base.js";
@@ -30,11 +31,18 @@ export abstract class JoinOperator {
   readonly left: unknown;
   readonly right: unknown;
   readonly condition: JoinCondition;
+  cancelToken: CancellationToken | null = null;
 
   constructor(left: unknown, right: unknown, condition: JoinCondition) {
     this.left = left;
     this.right = right;
     this.condition = condition;
+  }
+
+  checkCancelled(): void {
+    if (this.cancelToken !== null) {
+      this.cancelToken.check();
+    }
   }
 
   abstract execute(context: ExecutionContext): GeneralizedPostingList;

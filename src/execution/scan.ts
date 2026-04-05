@@ -44,6 +44,7 @@ export class SeqScanOp extends PhysicalOperator {
   }
 
   next(): Batch | null {
+    this.checkCancelled();
     if (this._iterator === null) {
       return null;
     }
@@ -116,6 +117,7 @@ export class PostingListScanOp extends PhysicalOperator {
   }
 
   next(): Batch | null {
+    this.checkCancelled();
     const entries = this._postingList.entries;
     if (this._index >= entries.length) {
       return null;

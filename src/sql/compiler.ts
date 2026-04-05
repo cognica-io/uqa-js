@@ -8826,9 +8826,30 @@ export class SQLCompiler {
   }
 
   /**
+   * Recursively set the cancel token on all operators in the tree.
+   */
+  private _propagateCancelToTree(op: unknown): void {
+    if (op === null || op === undefined) return;
+    const obj = op as Record<string, unknown>;
+    if ("cancelToken" in obj) {
+      const eng = this._engine as { _cancelToken?: unknown } | null;
+      if (eng && eng._cancelToken) {
+        obj["cancelToken"] = eng._cancelToken;
+      }
+    }
+    if ("left" in obj) {
+      this._propagateCancelToTree(obj["left"]);
+    }
+    if ("right" in obj) {
+      this._propagateCancelToTree(obj["right"]);
+    }
+  }
+
+  /**
    * Execute an operator tree via PlanExecutor.
    */
   private _executePlan(op: Operator, ctx: ExecutionContext): PostingList {
+    this._propagateCancelToTree(op);
     try {
       const executor = new PlanExecutor(ctx);
       return executor.execute(op);

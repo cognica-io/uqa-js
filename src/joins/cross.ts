@@ -10,6 +10,7 @@
 // Unified Query Algebra -- cross join (Cartesian product)
 // 1:1 port of uqa/joins/cross.py
 
+import type { CancellationToken } from "../cancel.js";
 import type { GeneralizedPostingEntry } from "../core/types.js";
 import { createPayload } from "../core/types.js";
 import { GeneralizedPostingList } from "../core/posting-list.js";
@@ -20,10 +21,17 @@ import { entryDocId } from "./base.js";
 export class CrossJoinOperator {
   readonly left: unknown;
   readonly right: unknown;
+  cancelToken: CancellationToken | null = null;
 
   constructor(left: unknown, right: unknown) {
     this.left = left;
     this.right = right;
+  }
+
+  checkCancelled(): void {
+    if (this.cancelToken !== null) {
+      this.cancelToken.check();
+    }
   }
 
   execute(context: ExecutionContext): GeneralizedPostingList {
@@ -32,6 +40,7 @@ export class CrossJoinOperator {
 
     const result: GeneralizedPostingEntry[] = [];
     for (const le of leftEntries) {
+      this.checkCancelled();
       for (const re of rightEntries) {
         result.push({
           docIds: [entryDocId(le), entryDocId(re)],

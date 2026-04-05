@@ -9,6 +9,9 @@
 
 // Unified Query Algebra -- Public API re-exports
 
+// Cancellation
+export { QueryCancelled, CancellationToken } from "./cancel.js";
+
 // Core
 export { PostingList, GeneralizedPostingList } from "./core/posting-list.js";
 export type { DocId, Payload, PostingEntry, Vertex, Edge } from "./core/types.js";

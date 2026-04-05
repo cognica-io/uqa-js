@@ -12,6 +12,7 @@
 //
 // Wires together: SQLCompiler, Tables, GraphStore, QueryBuilder.
 
+import { CancellationToken } from "./cancel.js";
 import { SQLCompiler } from "./sql/compiler.js";
 import type { SQLResult } from "./sql/compiler.js";
 import { Table, createColumnDef } from "./sql/table.js";
@@ -278,6 +279,7 @@ export class Engine {
   private _catalog: Catalog | null;
   private _indexManager: IndexManager | null;
   private _transaction: Transaction | InMemoryTransaction | null;
+  _cancelToken: CancellationToken;
   private _compiler: SQLCompiler;
   private _dbPath: string | null;
   private _parallelWorkers: number;
@@ -287,6 +289,7 @@ export class Engine {
     this._dbPath = opts?.dbPath ?? null;
     this._parallelWorkers = opts?.parallelWorkers ?? 4;
     this._spillThreshold = opts?.spillThreshold ?? 0;
+    this._cancelToken = new CancellationToken();
     this._tables = new SchemaAwareTableStore();
     this._views = new Map();
     this._prepared = new Map();
@@ -354,7 +357,16 @@ export class Engine {
 
   // -- SQL execution ----------------------------------------------------------
 
+  get cancelToken(): CancellationToken {
+    return this._cancelToken;
+  }
+
+  cancel(): void {
+    this._cancelToken.cancel();
+  }
+
   async sql(query: string, params?: unknown[]): Promise<SQLResult | null> {
+    this._cancelToken.reset();
     return this._compiler.execute(query, params);
   }
 

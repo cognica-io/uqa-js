@@ -64,6 +64,7 @@ export class LeftOuterJoinOperator extends JoinOperator {
       bucket.push(entry);
     }
 
+    this.checkCancelled();
     const result: GeneralizedPostingEntry[] = [];
     for (const leftEntry of leftEntries) {
       const leftKey = (leftEntry.payload.fields as Record<string, unknown>)[
@@ -196,6 +197,7 @@ export class FullOuterJoinOperator extends JoinOperator {
       bucket.push(entry);
     }
 
+    this.checkCancelled();
     const matchedRightIds = new Set<number>();
     const result: GeneralizedPostingEntry[] = [];
 
