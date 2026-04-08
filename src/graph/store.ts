@@ -146,8 +146,8 @@ export class MemoryGraphStore extends GraphStore {
   private _graphs: Map<string, _GraphPartition> = new Map();
   private _vertexMembership: Map<number, Set<string>> = new Map();
   private _edgeMembership: Map<number, Set<string>> = new Map();
-  private _nextVertexId: number = 0;
-  private _nextEdgeId: number = 0;
+  private _nextVertexId: number = 1;
+  private _nextEdgeId: number = 1;
 
   // -- Graph lifecycle --------------------------------------------------------
 
@@ -508,8 +508,8 @@ export class MemoryGraphStore extends GraphStore {
     this._graphs.clear();
     this._vertexMembership.clear();
     this._edgeMembership.clear();
-    this._nextVertexId = 0;
-    this._nextEdgeId = 0;
+    this._nextVertexId = 1;
+    this._nextEdgeId = 1;
   }
 
   get vertices(): Map<number, Vertex> {

@@ -450,8 +450,28 @@ function compilePhrase(
     } as unknown as Operator;
   }
 
-  const analyzer = field ? idx.getSearchAnalyzer(field) : idx.analyzer;
-  const terms = analyzer.analyze(node.phrase);
+  let terms: string[];
+  if (field) {
+    terms = idx.getSearchAnalyzer(field).analyze(node.phrase);
+  } else {
+    // All-field phrase: collect terms from each field's analyzer
+    const fa = idx.fieldAnalyzers;
+    const fieldNames = Object.keys(fa);
+    if (fieldNames.length > 0) {
+      const seen = new Set<string>();
+      terms = [];
+      for (const fn of fieldNames) {
+        for (const t of idx.getSearchAnalyzer(fn).analyze(node.phrase)) {
+          if (!seen.has(t)) {
+            seen.add(t);
+            terms.push(t);
+          }
+        }
+      }
+    } else {
+      terms = idx.analyzer.analyze(node.phrase);
+    }
+  }
   if (terms.length === 0) {
     return {
       execute: () => new PostingList(),

@@ -4031,6 +4031,17 @@ export class SQLCompiler {
         }
       }
 
+      // Check for LATERAL table function
+      const rangeFunc = nodeGet(fromItem, "RangeFunction");
+      if (rangeFunc !== null && rangeFunc !== undefined) {
+        const rfObj = asObj(rangeFunc);
+        const isLateral = nodeGet(rfObj, "lateral") === true;
+        if (isLateral && result !== null) {
+          result = this._resolveLateralRangeFunction(result, rfObj, params);
+          continue;
+        }
+      }
+
       const itemRows = this._resolveFromItem(fromItem, params);
 
       if (result === null) {
@@ -4229,6 +4240,37 @@ export class SQLCompiler {
     return result;
   }
 
+  private _resolveLateralRangeFunction(
+    leftRows: Record<string, unknown>[],
+    rangeFunc: Record<string, unknown>,
+    params: unknown[],
+  ): Record<string, unknown>[] {
+    const alias = extractAlias(rangeFunc);
+    const result: Record<string, unknown>[] = [];
+
+    const prevOuterRow = this._correlatedOuterRow;
+    try {
+      for (const leftRow of leftRows) {
+        this._correlatedOuterRow = leftRow;
+        const subRows = this._compileFromFunction(rangeFunc, params);
+        for (const subRow of subRows) {
+          const rightFields: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(subRow)) {
+            rightFields[k] = v;
+            if (alias && !k.includes(".")) {
+              rightFields[`${alias}.${k}`] = v;
+            }
+          }
+          result.push({ ...leftRow, ...rightFields });
+        }
+      }
+    } finally {
+      this._correlatedOuterRow = prevOuterRow;
+    }
+
+    return result;
+  }
+
   // -- FROM-clause table functions ------------------------------------
 
   private _compileFromFunction(
@@ -4322,8 +4364,8 @@ export class SQLCompiler {
       );
     }
 
-    if (funcName === "create_graph") return this._buildCreateGraph(funcArgs, evaluator);
-    if (funcName === "drop_graph") return this._buildDropGraph(funcArgs, evaluator);
+    if (funcName === "create_graph" || funcName === "graph_create") return this._buildCreateGraph(funcArgs, evaluator);
+    if (funcName === "drop_graph" || funcName === "graph_drop") return this._buildDropGraph(funcArgs, evaluator);
     if (funcName === "create_analyzer") return this._buildCreateAnalyzer(funcArgs, evaluator);
     if (funcName === "drop_analyzer") return this._buildDropAnalyzer(funcArgs, evaluator);
     if (funcName === "list_analyzers") return this._buildListAnalyzers();
@@ -4332,6 +4374,14 @@ export class SQLCompiler {
     if (funcName === "graph_add_edge") return this._buildGraphAddEdge(funcArgs, evaluator);
     if (funcName === "build_grid_graph") return this._buildGridGraph(funcArgs, evaluator);
     if (funcName === "cypher") return this._buildCypherFrom(funcArgs, evaluator);
+    if (funcName === "graph_create_node") return this._buildGraphCreateNode(funcArgs);
+    if (funcName === "graph_nodes") return this._buildGraphNodes(funcArgs);
+    if (funcName === "graph_delete_node") return this._buildGraphDeleteNode(funcArgs);
+    if (funcName === "graph_create_edge") return this._buildGraphCreateEdge(funcArgs);
+    if (funcName === "graph_edges") return this._buildGraphEdges(funcArgs);
+    if (funcName === "graph_delete_edge") return this._buildGraphDeleteEdge(funcArgs);
+    if (funcName === "graph_neighbors") return this._buildGraphNeighbors(funcArgs);
+    if (funcName === "graph_traverse") return this._buildGraphTraverse(funcArgs);
 
     throw new Error(`Unsupported FROM-clause function: ${funcName}`);
   }
@@ -4432,6 +4482,455 @@ export class SQLCompiler {
     for (let i = 0; i < this._params.length; i++) params[String(i + 1)] = this._params[i];
     const compiler = new CypherCompiler(graph, gn, params);
     return compiler.executeRows(qs, params);
+  }
+
+  // -- Correlated column ref helpers for LATERAL graph functions ------
+
+  private _resolveCorrelatedColumnRef(node: Record<string, unknown>): unknown | null {
+    const colRef = nodeGet(node, "ColumnRef");
+    if (colRef === null || colRef === undefined) return null;
+    const outerRow = this._correlatedOuterRow;
+    if (outerRow === null) return null;
+    const cr = asObj(colRef ?? node);
+    const fields = asList(nodeGet(cr, "fields"));
+    const parts: string[] = [];
+    for (const f of fields) {
+      const s = extractString(f);
+      if (s) parts.push(s);
+    }
+    const qualified = parts.join(".");
+    if (qualified in outerRow) return outerRow[qualified];
+    const unqualified = parts.length > 0 ? parts[parts.length - 1]! : null;
+    if (unqualified && unqualified in outerRow) return outerRow[unqualified];
+    return null;
+  }
+
+  private _extractStringArg(node: Record<string, unknown>): string {
+    // A_Const string
+    const aConst = nodeGet(node, "A_Const");
+    if (aConst !== null && aConst !== undefined) {
+      return String(extractConstValue(node, this._params));
+    }
+    // ParamRef
+    const paramRef = nodeGet(node, "ParamRef");
+    if (paramRef !== null && paramRef !== undefined) {
+      return String(extractConstValue(node, this._params));
+    }
+    // ColumnRef (correlated)
+    const colRef = nodeGet(node, "ColumnRef");
+    if (colRef !== null && colRef !== undefined) {
+      const resolved = this._resolveCorrelatedColumnRef(node);
+      if (resolved !== null) return String(resolved);
+      return extractColumnName(node);
+    }
+    return String(extractConstValue(node, this._params));
+  }
+
+  private _extractIntArg(node: Record<string, unknown>): number {
+    // A_Const integer
+    const aConst = nodeGet(node, "A_Const");
+    if (aConst !== null && aConst !== undefined) {
+      return Number(extractConstValue(node, this._params));
+    }
+    // ParamRef
+    const paramRef = nodeGet(node, "ParamRef");
+    if (paramRef !== null && paramRef !== undefined) {
+      const val = extractConstValue(node, this._params);
+      return Number(val);
+    }
+    // ColumnRef (correlated)
+    const colRef = nodeGet(node, "ColumnRef");
+    if (colRef !== null && colRef !== undefined) {
+      const resolved = this._resolveCorrelatedColumnRef(node);
+      if (resolved !== null) return Number(resolved);
+    }
+    return Number(extractConstValue(node, this._params));
+  }
+
+  private _extractStringOrNull(node: Record<string, unknown>): string | null {
+    const aConst = nodeGet(node, "A_Const");
+    if (aConst !== null && aConst !== undefined) {
+      const co = asObj(aConst);
+      if (nodeGet(co, "isnull") === true) return null;
+    }
+    const val = extractConstValue(node, this._params);
+    if (val === null || val === undefined) return null;
+    return String(val);
+  }
+
+  private _extractEdgeLabels(node: Record<string, unknown>): Set<string> | null {
+    // NULL
+    const aConst = nodeGet(node, "A_Const");
+    if (aConst !== null && aConst !== undefined) {
+      const co = asObj(aConst);
+      if (nodeGet(co, "isnull") === true) return null;
+    }
+    // A_ArrayExpr
+    const arrayExpr = nodeGet(node, "A_ArrayExpr");
+    if (arrayExpr !== null && arrayExpr !== undefined) {
+      const elements = asList(nodeGet(asObj(arrayExpr), "elements"));
+      const labels = new Set<string>();
+      for (const elem of elements) {
+        labels.add(String(extractConstValue(elem, this._params)));
+      }
+      return labels.size > 0 ? labels : null;
+    }
+    const raw = this._extractStringArg(node);
+    if (!raw) return null;
+    return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+  }
+
+  private _isIntArg(node: Record<string, unknown>): boolean {
+    // Check if this arg resolves to an integer (for graph_edges mode dispatch)
+    const aConst = nodeGet(node, "A_Const");
+    if (aConst !== null && aConst !== undefined) {
+      const co = asObj(aConst);
+      const ival = nodeGet(co, "ival");
+      if (ival !== null && ival !== undefined) return true;
+      // Check nested val.Integer
+      const val = nodeGet(co, "val");
+      if (val !== null && val !== undefined && typeof val === "object") {
+        const vObj = asObj(val);
+        if (nodeGet(vObj, "Integer") !== null || nodeGet(vObj, "ival") !== null) return true;
+      }
+      return false;
+    }
+    const paramRef = nodeGet(node, "ParamRef");
+    if (paramRef !== null && paramRef !== undefined) return true;
+    const colRef = nodeGet(node, "ColumnRef");
+    if (colRef !== null && colRef !== undefined) {
+      return this._resolveCorrelatedColumnRef(node) !== null;
+    }
+    return false;
+  }
+
+  private _getGraphStore(graphName: string): GraphStore {
+    return (this._engine as { getGraph(n: string): GraphStore }).getGraph(graphName);
+  }
+
+  // -- Standalone property graph SQL functions ---------------------------
+
+  private _buildGraphCreateNode(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length < 2) throw new Error("graph_create_node('graph', 'label'[, '{props}'])");
+    const graphName = this._extractStringArg(args[0]!);
+    const label = this._extractStringArg(args[1]!);
+    let props: Record<string, unknown> = {};
+    if (args.length > 2) {
+      props = JSON.parse(this._extractStringArg(args[2]!)) as Record<string, unknown>;
+    }
+    const gs = this._getGraphStore(graphName);
+    const vid = gs.nextVertexId();
+    gs.addVertex(createVertex(vid, label, props), graphName);
+    return [{ id: `${graphName}:${label}:${String(vid)}` }];
+  }
+
+  private _buildGraphNodes(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length === 0) throw new Error("graph_nodes('graph'[, 'label'][, '{filter}'])");
+    const graphName = this._extractStringArg(args[0]!);
+
+    let label: string | null = null;
+    if (args.length > 1) {
+      label = this._extractStringArg(args[1]!);
+    }
+
+    let filterProps: Record<string, unknown> = {};
+    if (args.length > 2) {
+      filterProps = JSON.parse(this._extractStringArg(args[2]!)) as Record<string, unknown>;
+    }
+
+    const gs = this._getGraphStore(graphName);
+    let vertices = label
+      ? gs.verticesByLabel(label, graphName)
+      : gs.verticesInGraph(graphName);
+
+    const filterKeys = Object.keys(filterProps);
+    if (filterKeys.length > 0) {
+      vertices = vertices.filter((v) =>
+        filterKeys.every((k) => v.properties[k] === filterProps[k]),
+      );
+    }
+
+    return vertices.map((v) => ({
+      id: v.vertexId,
+      label: v.label,
+      properties: JSON.stringify(v.properties),
+    }));
+  }
+
+  private _buildGraphDeleteNode(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length < 2) throw new Error("graph_delete_node('graph', vertex_id)");
+    const graphName = this._extractStringArg(args[0]!);
+    const vid = this._extractIntArg(args[1]!);
+    const gs = this._getGraphStore(graphName);
+    gs.removeVertex(vid, graphName);
+    return [{ result: `vertex ${String(vid)} deleted from ${graphName}` }];
+  }
+
+  private _buildGraphCreateEdge(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length < 4) throw new Error("graph_create_edge('graph', 'type', source_id, target_id[, '{props}'])");
+    const graphName = this._extractStringArg(args[0]!);
+    const edgeType = this._extractStringArg(args[1]!);
+    const src = this._extractIntArg(args[2]!);
+    const tgt = this._extractIntArg(args[3]!);
+    let props: Record<string, unknown> = {};
+    if (args.length > 4) {
+      props = JSON.parse(this._extractStringArg(args[4]!)) as Record<string, unknown>;
+    }
+    const gs = this._getGraphStore(graphName);
+    const eid = gs.nextEdgeId();
+    gs.addEdge(createEdge(eid, src, tgt, edgeType, props), graphName);
+    return [{ id: `${graphName}:${edgeType}:${String(eid)}` }];
+  }
+
+  private _buildGraphEdges(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length === 0) throw new Error("graph_edges('graph'[, ...])");
+    const graphName = this._extractStringArg(args[0]!);
+    const gs = this._getGraphStore(graphName);
+
+    // Detect per-vertex mode: 2nd arg is an integer (literal, param, or
+    // correlated column reference from LATERAL context)
+    const perVertex = args.length > 1 && this._isIntArg(args[1]!);
+
+    if (perVertex) {
+      const vertexId = this._extractIntArg(args[1]!);
+      let edgeLabel: string | null = null;
+      if (args.length > 2) {
+        edgeLabel = this._extractStringOrNull(args[2]!);
+      }
+      let direction = "outgoing";
+      if (args.length > 3) {
+        direction = this._extractStringArg(args[3]!).toLowerCase();
+      }
+
+      let allEdges = gs.edgesInGraph(graphName);
+      allEdges = allEdges.filter((e) => {
+        if (edgeLabel !== null && e.label !== edgeLabel) return false;
+        if (direction === "outgoing") return e.sourceId === vertexId;
+        if (direction === "incoming") return e.targetId === vertexId;
+        if (direction === "both") return e.sourceId === vertexId || e.targetId === vertexId;
+        return e.sourceId === vertexId;
+      });
+
+      return allEdges.map((e) => ({
+        id: e.edgeId,
+        source_id: e.sourceId,
+        target_id: e.targetId,
+        label: e.label,
+        properties: JSON.stringify(e.properties),
+      }));
+    }
+
+    // Graph-wide mode
+    let edgeLabel: string | null = null;
+    if (args.length > 1) {
+      edgeLabel = this._extractStringOrNull(args[1]!);
+      if (edgeLabel === "") edgeLabel = null;
+    }
+
+    let filterProps: Record<string, unknown> = {};
+    if (args.length > 2) {
+      const filterStr = this._extractStringOrNull(args[2]!);
+      if (filterStr) {
+        filterProps = JSON.parse(filterStr) as Record<string, unknown>;
+      }
+    }
+
+    let allEdges = gs.edgesInGraph(graphName);
+    if (edgeLabel !== null) {
+      allEdges = allEdges.filter((e) => e.label === edgeLabel);
+    }
+    const filterKeys = Object.keys(filterProps);
+    if (filterKeys.length > 0) {
+      allEdges = allEdges.filter((e) =>
+        filterKeys.every((k) => e.properties[k] === filterProps[k]),
+      );
+    }
+
+    return allEdges.map((e) => ({
+      id: e.edgeId,
+      source_id: e.sourceId,
+      target_id: e.targetId,
+      label: e.label,
+      properties: JSON.stringify(e.properties),
+    }));
+  }
+
+  private _buildGraphDeleteEdge(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length < 2) throw new Error("graph_delete_edge('graph', edge_id)");
+    const graphName = this._extractStringArg(args[0]!);
+    const eid = this._extractIntArg(args[1]!);
+    const gs = this._getGraphStore(graphName);
+    gs.removeEdge(eid, graphName);
+    return [{ result: `edge ${String(eid)} deleted from ${graphName}` }];
+  }
+
+  private _buildGraphNeighbors(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length < 2) throw new Error("graph_neighbors('graph', id[, 'type'][, 'direction'][, depth])");
+    const graphName = this._extractStringArg(args[0]!);
+    const startId = this._extractIntArg(args[1]!);
+
+    let edgeLabel: string | null = null;
+    if (args.length > 2) {
+      const raw = this._extractStringArg(args[2]!);
+      if (raw) edgeLabel = raw;
+    }
+
+    let direction = "outgoing";
+    if (args.length > 3) {
+      direction = this._extractStringArg(args[3]!).toLowerCase();
+    }
+
+    let maxDepth = 1;
+    if (args.length > 4) {
+      maxDepth = this._extractIntArg(args[4]!);
+    }
+
+    const gs = this._getGraphStore(graphName);
+
+    // BFS traversal
+    const visited = new Map<number, { depth: number; path: number[] }>();
+    const queue: { vid: number; depth: number; path: number[] }[] = [];
+    queue.push({ vid: startId, depth: 0, path: [startId] });
+
+    while (queue.length > 0) {
+      const { vid, depth, path } = queue.shift()!;
+      if (depth > 0 && !visited.has(vid)) {
+        visited.set(vid, { depth, path });
+      }
+      if (depth >= maxDepth) continue;
+
+      const neighborIds: number[] = [];
+      if (direction === "outgoing" || direction === "both") {
+        neighborIds.push(...gs.neighbors(vid, graphName, edgeLabel, "out"));
+      }
+      if (direction === "incoming" || direction === "both") {
+        neighborIds.push(...gs.neighbors(vid, graphName, edgeLabel, "in"));
+      }
+
+      for (const nid of neighborIds) {
+        if (!visited.has(nid) && nid !== startId) {
+          queue.push({ vid: nid, depth: depth + 1, path: [...path, nid] });
+        }
+      }
+    }
+
+    const entries = [...visited.entries()].sort((a, b) => {
+      if (a[1].depth !== b[1].depth) return a[1].depth - b[1].depth;
+      return a[0] - b[0];
+    });
+
+    return entries.map(([vid, { depth, path }]) => {
+      const vertex = gs.getVertex(vid);
+      return {
+        id: vid,
+        label: vertex ? vertex.label : "",
+        properties: JSON.stringify(vertex ? vertex.properties : {}),
+        depth,
+        path: JSON.stringify(path),
+      };
+    });
+  }
+
+  private _buildGraphTraverse(args: Record<string, unknown>[]): Record<string, unknown>[] {
+    if (args.length < 2) throw new Error("graph_traverse('graph', id[, 'types'][, 'dir'][, depth[, 'strategy']])");
+    const graphName = this._extractStringArg(args[0]!);
+    const startId = this._extractIntArg(args[1]!);
+
+    let edgeLabels: Set<string> | null = null;
+    if (args.length > 2) {
+      edgeLabels = this._extractEdgeLabels(args[2]!);
+    }
+
+    let direction = "outgoing";
+    if (args.length > 3) {
+      direction = this._extractStringArg(args[3]!).toLowerCase();
+    }
+
+    let maxDepth = 1;
+    if (args.length > 4) {
+      maxDepth = this._extractIntArg(args[4]!);
+    }
+
+    let strategy = "bfs";
+    if (args.length > 5) {
+      strategy = this._extractStringArg(args[5]!).toLowerCase();
+    }
+
+    const gs = this._getGraphStore(graphName);
+
+    const neighborsMulti = (vid: number): number[] => {
+      const ids: number[] = [];
+      if (edgeLabels === null) {
+        if (direction === "outgoing" || direction === "both") {
+          ids.push(...gs.neighbors(vid, graphName, null, "out"));
+        }
+        if (direction === "incoming" || direction === "both") {
+          ids.push(...gs.neighbors(vid, graphName, null, "in"));
+        }
+      } else {
+        for (const lbl of edgeLabels) {
+          if (direction === "outgoing" || direction === "both") {
+            ids.push(...gs.neighbors(vid, graphName, lbl, "out"));
+          }
+          if (direction === "incoming" || direction === "both") {
+            ids.push(...gs.neighbors(vid, graphName, lbl, "in"));
+          }
+        }
+      }
+      return ids;
+    };
+
+    const visited = new Map<number, { depth: number; path: number[] }>();
+
+    if (strategy === "dfs") {
+      const stack: { vid: number; depth: number; path: number[] }[] = [
+        { vid: startId, depth: 0, path: [startId] },
+      ];
+      while (stack.length > 0) {
+        const { vid, depth, path } = stack.pop()!;
+        if (depth > 0 && !visited.has(vid)) {
+          visited.set(vid, { depth, path });
+        }
+        if (depth >= maxDepth) continue;
+        for (const nid of neighborsMulti(vid)) {
+          if (!visited.has(nid) && nid !== startId) {
+            stack.push({ vid: nid, depth: depth + 1, path: [...path, nid] });
+          }
+        }
+      }
+    } else {
+      const queue: { vid: number; depth: number; path: number[] }[] = [
+        { vid: startId, depth: 0, path: [startId] },
+      ];
+      while (queue.length > 0) {
+        const { vid, depth, path } = queue.shift()!;
+        if (depth > 0 && !visited.has(vid)) {
+          visited.set(vid, { depth, path });
+        }
+        if (depth >= maxDepth) continue;
+        for (const nid of neighborsMulti(vid)) {
+          if (!visited.has(nid) && nid !== startId) {
+            queue.push({ vid: nid, depth: depth + 1, path: [...path, nid] });
+          }
+        }
+      }
+    }
+
+    const entries = [...visited.entries()].sort((a, b) => {
+      if (a[1].depth !== b[1].depth) return a[1].depth - b[1].depth;
+      return a[0] - b[0];
+    });
+
+    return entries.map(([vid, { depth, path }]) => {
+      const vertex = gs.getVertex(vid);
+      return {
+        id: vid,
+        label: vertex ? vertex.label : "",
+        properties: JSON.stringify(vertex ? vertex.properties : {}),
+        depth,
+        path: JSON.stringify(path),
+      };
+    });
   }
 
   private _buildGenerateSeries(
@@ -7328,16 +7827,49 @@ export class SQLCompiler {
     const idx = ctx.invertedIndex;
     let terms: string[] = [];
     if (idx) {
-      const idxAny = idx as unknown as Record<string, unknown>;
-      const analyzer =
-        fieldName && typeof idxAny["getSearchAnalyzer"] === "function"
-          ? (
+      if (fieldName) {
+        const idxAny = idx as unknown as Record<string, unknown>;
+        const analyzer =
+          typeof idxAny["getSearchAnalyzer"] === "function"
+            ? (
+                idx as unknown as {
+                  getSearchAnalyzer(f: string): { analyze(q: string): string[] };
+                }
+              ).getSearchAnalyzer(fieldName)
+            : (idx as unknown as { analyzer: { analyze(q: string): string[] } })
+                .analyzer;
+        terms = analyzer.analyze(query);
+      } else {
+        // All-field search: collect terms from each field's analyzer
+        // so that per-field analyzers (e.g. standard_cjk) produce the
+        // correct tokens for scoring.
+        const seen = new Set<string>();
+        const fa = (
+          idx as unknown as {
+            fieldAnalyzers: Record<string, { analyze(q: string): string[] }>;
+          }
+        ).fieldAnalyzers;
+        const fieldNames = fa ? Object.keys(fa) : [];
+        if (fieldNames.length > 0) {
+          for (const fn of fieldNames) {
+            const a = (
               idx as unknown as {
                 getSearchAnalyzer(f: string): { analyze(q: string): string[] };
               }
-            ).getSearchAnalyzer(fieldName)
-          : (idx as unknown as { analyzer: { analyze(q: string): string[] } }).analyzer;
-      terms = analyzer.analyze(query);
+            ).getSearchAnalyzer(fn);
+            for (const t of a.analyze(query)) {
+              if (!seen.has(t)) {
+                seen.add(t);
+                terms.push(t);
+              }
+            }
+          }
+        } else {
+          terms = (
+            idx as unknown as { analyzer: { analyze(q: string): string[] } }
+          ).analyzer.analyze(query);
+        }
+      }
     }
     const retrieval = new TermOperator(query, fieldName ?? undefined);
 
@@ -7502,10 +8034,43 @@ export class SQLCompiler {
     const idx = ctx.invertedIndex;
     let terms: string[] = [];
     if (idx) {
-      const analyzer = (
-        idx as unknown as { analyzer: { analyze(q: string): string[] } }
-      ).analyzer;
-      terms = analyzer.analyze(query);
+      if (fieldName) {
+        terms = (
+          idx as unknown as {
+            getSearchAnalyzer(f: string): { analyze(q: string): string[] };
+          }
+        )
+          .getSearchAnalyzer(fieldName)
+          .analyze(query);
+      } else {
+        const seen = new Set<string>();
+        const fa = (
+          idx as unknown as {
+            fieldAnalyzers: Record<string, { analyze(q: string): string[] }>;
+          }
+        ).fieldAnalyzers;
+        const fieldNames = fa ? Object.keys(fa) : [];
+        if (fieldNames.length > 0) {
+          for (const fn of fieldNames) {
+            for (const t of (
+              idx as unknown as {
+                getSearchAnalyzer(f: string): { analyze(q: string): string[] };
+              }
+            )
+              .getSearchAnalyzer(fn)
+              .analyze(query)) {
+              if (!seen.has(t)) {
+                seen.add(t);
+                terms.push(t);
+              }
+            }
+          }
+        } else {
+          terms = (
+            idx as unknown as { analyzer: { analyze(q: string): string[] } }
+          ).analyzer.analyze(query);
+        }
+      }
     }
     const retrieval = new TermOperator(query, fieldName);
 

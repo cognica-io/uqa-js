@@ -306,6 +306,61 @@ await engine.sql(`
 `);
 ```
 
+### Graph SQL Functions
+
+```typescript
+// Create a named graph
+await engine.sql("SELECT * FROM create_graph('social')");
+
+// Add nodes with auto-generated IDs
+await engine.sql(`
+  SELECT * FROM graph_create_node('social', 'Person', '{"name":"Alice","age":30}')
+`); // returns id = 'social:Person:1'
+await engine.sql(`
+  SELECT * FROM graph_create_node('social', 'Person', '{"name":"Bob","age":25}')
+`);
+
+// Add edges
+await engine.sql(`
+  SELECT * FROM graph_create_edge('social', 'KNOWS', 1, 2, '{"since":2020}')
+`);
+
+// Query all nodes
+await engine.sql("SELECT * FROM graph_nodes('social')");
+// Filter by label and properties
+await engine.sql(`SELECT * FROM graph_nodes('social', 'Person', '{"name":"Alice"}')`);
+
+// Query edges -- graph-wide or per-vertex
+await engine.sql("SELECT * FROM graph_edges('social', 'KNOWS')");
+await engine.sql("SELECT * FROM graph_edges('social', 1, NULL, 'outgoing')");
+
+// Multi-hop BFS neighbor traversal
+await engine.sql(`
+  SELECT * FROM graph_neighbors('social', 1, 'KNOWS', 'outgoing', 2)
+`);
+
+// Advanced traversal with BFS/DFS and multiple edge types
+await engine.sql(`
+  SELECT * FROM graph_traverse('social', 1, 'KNOWS,FOLLOWS', 'outgoing', 2, 'bfs')
+`);
+
+// LATERAL join: per-vertex edge count
+await engine.sql(`
+  SELECT n.name, sub.cnt
+  FROM nodes n,
+  LATERAL (SELECT COUNT(*) AS cnt
+           FROM graph_edges('social', n.node_id, NULL, 'outgoing')) sub
+  ORDER BY n.name
+`);
+
+// Delete nodes and edges
+await engine.sql("SELECT * FROM graph_delete_edge('social', 1)");
+await engine.sql("SELECT * FROM graph_delete_node('social', 2)");
+
+// Drop graph
+await engine.sql("SELECT * FROM drop_graph('social')");
+```
+
 ### Foreign Data Wrappers (DuckDB / Arrow)
 
 ```typescript
@@ -551,7 +606,7 @@ src/
   sql/            SQL compiler (libpg-query WASM), expression evaluator, FTS query parser,
                   table DDL/DML, FDW dispatch
   api/            Fluent QueryBuilder
-tests/            2,952 tests across 111 test files
+tests/            3,015 tests across 112 test files
 ```
 
 ## SQL Reference
@@ -688,8 +743,17 @@ Used inside `deep_fusion()` to compose neural network pipelines:
 | `betweenness(['table_or_graph'])` | Betweenness centrality as table source |
 | `graph_add_vertex(id, 'label', 'table'[, 'props'])` | Add graph vertex to table's graph store |
 | `graph_add_edge(eid, src, tgt, 'label', 'table'[, 'props'])` | Add graph edge to table's graph store |
-| `create_graph('name')` | Create a named graph namespace |
-| `drop_graph('name')` | Drop a named graph |
+| `create_graph('name')` / `graph_create('name')` | Create a named graph namespace |
+| `drop_graph('name')` / `graph_drop('name')` | Drop a named graph |
+| `graph_create_node('graph', 'label'[, '{props}'])` | Create vertex with auto-generated ID |
+| `graph_nodes('graph'[, 'label'][, '{filter}'])` | Query vertices with optional label/property filter |
+| `graph_delete_node('graph', id)` | Delete vertex and all incident edges |
+| `graph_create_edge('graph', 'type', src, tgt[, '{props}'])` | Create directed edge with auto-generated ID |
+| `graph_edges('graph'[, 'type'][, '{filter}'])` | Query edges (graph-wide mode) |
+| `graph_edges('graph', vertex_id[, 'type'\|NULL][, 'dir'])` | Query edges of a vertex (per-vertex mode) |
+| `graph_delete_edge('graph', edge_id)` | Delete an edge |
+| `graph_neighbors('graph', id[, 'type'][, 'dir'][, depth])` | Multi-hop BFS neighbor discovery |
+| `graph_traverse('graph', id[, 'types'][, 'dir'][, depth[, 'strategy']])` | BFS/DFS traversal with multiple edge types |
 | `cypher('graph', $$ query $$) AS (cols)` | Execute openCypher query on a named graph |
 | `create_analyzer('name', 'config')` | Create a custom text analyzer (JSON config) |
 | `drop_analyzer('name')` | Drop a custom text analyzer |

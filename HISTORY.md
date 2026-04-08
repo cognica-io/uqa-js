@@ -1,5 +1,22 @@
 # History
 
+## 0.4.0 (2026-04-08)
+
+Standalone property graph SQL functions and per-field analyzer fix.
+
+### Features
+- **Standalone property graph SQL functions**: 8 new FROM-clause table functions for graph CRUD and traversal on named graphs: `graph_create_node(graph, label[, props])` creates a vertex with auto-generated ID; `graph_nodes(graph[, label][, filter])` queries vertices with optional label and JSON property filtering; `graph_delete_node(graph, id)` removes a vertex and all incident edges; `graph_create_edge(graph, type, src, tgt[, props])` creates a directed edge with auto-generated ID; `graph_edges(graph, ...)` queries edges in two modes -- graph-wide with optional type/property filters, or per-vertex with direction control (`outgoing`/`incoming`/`both`); `graph_delete_edge(graph, id)` removes an edge; `graph_neighbors(graph, id[, type][, dir][, depth])` performs multi-hop BFS neighbor discovery with depth and path tracking; `graph_traverse(graph, id[, types][, dir][, depth][, strategy])` performs advanced graph traversal with multiple edge types (comma-separated, `ARRAY[...]`, or `NULL` for all), configurable direction, and BFS/DFS strategy selection.
+- **`graph_create` / `graph_drop` aliases**: `graph_create('name')` and `graph_drop('name')` as aliases for `create_graph` / `drop_graph`.
+- **LATERAL support for table functions**: `_resolveLateralRangeFunction()` enables LATERAL joins with FROM-clause table functions. Correlated column references from the outer query (e.g., `n.node_id`) are resolved via `_resolveCorrelatedColumnRef()` when processing graph table function arguments.
+- **1-based auto-increment IDs**: `MemoryGraphStore.nextVertexId()` and `nextEdgeId()` now start at 1 (matching the Python reference implementation).
+
+### Fixes
+- **Per-field analyzer in all-field FTS search**: When no field is specified in a full-text search, the engine now iterates each indexed field's own search analyzer instead of using a single default analyzer. This ensures fields indexed with different analyzers (e.g., `standard_cjk` for CJK text) produce correct tokens at search time. Fixed in `TermOperator.execute()`, `_makeTextSearchOp()`, `_makeBayesianWithPriorOp()`, and `compilePhrase()`.
+
+### Tests
+- 3,015 tests across 112 test files
+- Added 63 tests in `tests/sql/graph-standalone.test.ts` covering node CRUD, edge CRUD, graph-wide and per-vertex edge queries, BFS/DFS traversal, LATERAL correlated column references, `ARRAY[...]` and `NULL` edge type arguments, multi-graph isolation, and full lifecycle workflows
+
 ## 0.3.7 (2026-04-05)
 
 Query cancellation mechanism for in-flight queries.

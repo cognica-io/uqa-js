@@ -92,13 +92,39 @@ export class TermOperator extends Operator {
     const idx = context.invertedIndex;
     if (!idx) return new PostingList();
 
-    const analyzer = this.field ? idx.getSearchAnalyzer(this.field) : idx.analyzer;
-    const tokens = analyzer.analyze(this.term);
-    if (tokens.length === 0) return new PostingList();
+    let lists: PostingList[];
 
-    const lists = tokens.map((t) =>
-      this.field ? idx.getPostingList(this.field, t) : idx.getPostingListAnyField(t),
-    );
+    if (this.field !== null) {
+      // Single-field search: use that field's search analyzer.
+      const analyzer = idx.getSearchAnalyzer(this.field);
+      const tokens = analyzer.analyze(this.term);
+      if (tokens.length === 0) return new PostingList();
+      lists = tokens.map((t) => idx.getPostingList(this.field!, t));
+    } else {
+      // All-field search: analyze the term with each field's own
+      // search analyzer and look up per-field posting lists, then
+      // union everything.  This ensures that fields indexed with
+      // different analyzers (e.g. standard_cjk) produce the
+      // correct tokens at search time.
+      lists = [];
+      const fa = idx.fieldAnalyzers;
+      const fieldNames = Object.keys(fa);
+      if (fieldNames.length > 0) {
+        for (const fieldName of fieldNames) {
+          const analyzer = idx.getSearchAnalyzer(fieldName);
+          const tokens = analyzer.analyze(this.term);
+          for (const t of tokens) {
+            lists.push(idx.getPostingList(fieldName, t));
+          }
+        }
+      } else {
+        const tokens = idx.analyzer.analyze(this.term);
+        for (const t of tokens) {
+          lists.push(idx.getPostingListAnyField(t));
+        }
+      }
+      if (lists.length === 0) return new PostingList();
+    }
 
     let result = lists[0]!;
     for (let i = 1; i < lists.length; i++) {
