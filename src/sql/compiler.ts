@@ -101,6 +101,7 @@ import type { PostingEntry as PostingEntryType, Predicate } from "../core/types.
 import { listAnalyzers as listAnalyzersFn, getAnalyzer as getAnalyzerFn } from "../analysis/analyzer.js";
 import { CypherCompiler } from "../graph/cypher/compiler.js";
 import type { GraphStore } from "../storage/abc/graph-store.js";
+import type { IndexManager } from "../storage/index-manager.js";
 import type { IndexStats } from "../core/types.js";
 import { Operator } from "../operators/base.js";
 import type { ExecutionContext } from "../operators/base.js";
@@ -1393,7 +1394,14 @@ export class SQLCompiler {
     const ifExists = nodeGet(stmt, "missing_ok") === true;
 
     for (const obj of objects) {
-      const items = asList(obj);
+      // Objects may be List-wrapped: { List: { items: [...] } }
+      let items = asList(obj);
+      if (items.length === 0) {
+        const listNode = nodeGet(asObj(obj), "List");
+        if (listNode !== null && listNode !== undefined) {
+          items = asList(nodeGet(asObj(listNode), "items"));
+        }
+      }
       let tableName: string;
       if (items.length > 0) {
         tableName = extractString(items[items.length - 1]!);
@@ -1407,16 +1415,111 @@ export class SQLCompiler {
         if (ifExists) continue;
         throw new Error(`Table "${tableName}" does not exist`);
       }
-      this._tables.delete(tableName);
-
-      // Clean up associated sequences
-      for (const [seqName] of this._sequences) {
-        if (seqName.startsWith(`${tableName}_`)) {
-          this._sequences.delete(seqName);
-        }
-      }
+      this._dropTableByName(tableName);
     }
     return null;
+  }
+
+  /**
+   * Drop a single table and all associated in-memory and catalog state.
+   *
+   * Shared by _compileDropTable and _compileDropSchema so that CASCADE
+   * cleanup is identical to individual DROP TABLE.
+   */
+  private _dropTableByName(tableName: string): void {
+    const eng = this._engine as {
+      _btreeIndexes?: Map<string, [string, string[]]>;
+      _indexManager?: IndexManager | null;
+      _tempTables?: Set<string>;
+      _catalog?: { dropTableSchema: (n: string) => void } | null;
+    } | null;
+
+    // -- IndexManager (BTree physical indexes) --
+    if (eng?._indexManager) {
+      eng._indexManager.dropIndexesForTable(tableName);
+    }
+
+    // -- GIN indexes (compiler _indexes with method=gin) --
+    const toRemoveGin: string[] = [];
+    for (const [name, idx] of this._indexes) {
+      if (idx.tableName === tableName && idx.method === "gin") {
+        toRemoveGin.push(name);
+      }
+    }
+    for (const name of toRemoveGin) {
+      this._indexes.delete(name);
+    }
+
+    // -- In-memory BTree index metadata --
+    if (eng?._btreeIndexes) {
+      const toRemoveBtree: string[] = [];
+      for (const [name, [tbl]] of eng._btreeIndexes) {
+        if (tbl === tableName) {
+          toRemoveBtree.push(name);
+        }
+      }
+      for (const name of toRemoveBtree) {
+        eng._btreeIndexes.delete(name);
+        this._indexes.delete(name);
+      }
+    }
+
+    // -- FK validators on parent tables that reference this table --
+    this._removeFkValidatorsForChild(tableName);
+
+    // -- Remove from table store and temp set --
+    this._tables.delete(tableName);
+    if (eng?._tempTables) {
+      eng._tempTables.delete(tableName);
+    }
+
+    // -- Clean up associated sequences --
+    for (const [seqName] of this._sequences) {
+      if (seqName.startsWith(`${tableName}_`)) {
+        this._sequences.delete(seqName);
+      }
+    }
+
+    // -- Catalog (SQLite physical tables and rows) --
+    if (eng?._catalog) {
+      eng._catalog.dropTableSchema(tableName);
+    }
+  }
+
+  /**
+   * Remove FK delete/update validators that reference the child table.
+   *
+   * When a child table with FOREIGN KEY constraints is dropped, the
+   * parent tables still hold closure-based validators that check
+   * referential integrity against the (now gone) child. This method
+   * walks all remaining tables and purges those stale validators.
+   *
+   * The FK closures created in _registerFkValidators capture the child
+   * table reference in the closure scope, so we detect them by checking
+   * whether the validator still references a table that exists.
+   */
+  private _removeFkValidatorsForChild(childTable: string): void {
+    for (const table of this._tables.values()) {
+      table.fkDeleteValidators = table.fkDeleteValidators.filter(
+        (v) => !this._validatorReferencesTable(v as Function, childTable),
+      );
+      table.fkUpdateValidators = table.fkUpdateValidators.filter(
+        (v) => !this._validatorReferencesTable(v as Function, childTable),
+      );
+    }
+  }
+
+  /**
+   * Check whether a FK validator closure references a given table name.
+   *
+   * Validators registered in _registerFkValidators are tagged with a
+   * _childTable property that stores the child table name.
+   */
+  private _validatorReferencesTable(
+    validator: Function,
+    tableName: string,
+  ): boolean {
+    return (validator as Function & { _childTable?: string })._childTable === tableName;
   }
 
   private _compileDropView(stmt: Record<string, unknown>): SQLResult | null {
@@ -1455,7 +1558,14 @@ export class SQLCompiler {
     const ifExists = nodeGet(stmt, "missing_ok") === true;
 
     for (const obj of objects) {
-      const items = asList(obj);
+      // Objects may be List-wrapped: { List: { items: [...] } }
+      let items = asList(obj);
+      if (items.length === 0) {
+        const listNode = nodeGet(asObj(obj), "List");
+        if (listNode !== null && listNode !== undefined) {
+          items = asList(nodeGet(asObj(listNode), "items"));
+        }
+      }
       let idxName: string;
       if (items.length > 0) {
         idxName = extractString(items[items.length - 1]!);
@@ -1666,6 +1776,18 @@ export class SQLCompiler {
   // DDL: CREATE INDEX
   // ==================================================================
 
+  /** Return true if an index with the given name exists in any store. */
+  private _indexExists(name: string): boolean {
+    if (this._indexes.has(name)) return true;
+    const eng = this._engine as {
+      _indexManager?: IndexManager | null;
+      _btreeIndexes?: Map<string, [string, string[]]>;
+    } | null;
+    if (eng?._indexManager?.hasIndex(name)) return true;
+    if (eng?._btreeIndexes?.has(name)) return true;
+    return false;
+  }
+
   private _compileCreateIndex(stmt: Record<string, unknown>): SQLResult | null {
     const idxName = nodeStr(stmt, "idxname");
     const ifNotExists = nodeGet(stmt, "if_not_exists") === true;
@@ -1673,7 +1795,8 @@ export class SQLCompiler {
     const tableName = qualifiedName(relation);
     const method = (nodeStr(stmt, "accessMethod") || "btree").toLowerCase();
 
-    if (this._indexes.has(idxName)) {
+    // IF NOT EXISTS: check all index stores before proceeding.
+    if (this._indexExists(idxName)) {
       if (ifNotExists) return null;
       throw new Error(`Index "${idxName}" already exists`);
     }
@@ -2786,17 +2909,51 @@ export class SQLCompiler {
     const cascade = nodeGet(stmt, "behavior") === "DROP_CASCADE" ||
       nodeGet(stmt, "behavior") === 1;
     const ifExists = nodeGet(stmt, "missing_ok") === true;
-    const eng = this._engine as {
-      _tables: { dropSchema: (n: string, c: boolean, i: boolean) => void };
-    } | null;
-    if (eng) {
-      for (const obj of objects) {
-        const items = asList(obj);
-        const schemaName = items.length > 0
-          ? extractString(items[items.length - 1]!)
-          : extractString(obj);
-        eng._tables.dropSchema(schemaName, cascade, ifExists);
+    const store = this._tables as unknown as {
+      schemas: Set<string>;
+      tablesInSchema: (s: string) => Map<string, Table>;
+      dropSchema: (n: string, c: boolean, i: boolean) => void;
+    };
+
+    for (const obj of objects) {
+      // Objects may be List-wrapped: { List: { items: [...] } }
+      let items = asList(obj);
+      if (items.length === 0) {
+        const listNode = nodeGet(asObj(obj), "List");
+        if (listNode !== null && listNode !== undefined) {
+          items = asList(nodeGet(asObj(listNode), "items"));
+        }
       }
+      const schemaName = items.length > 0
+        ? extractString(items[items.length - 1]!)
+        : extractString(obj);
+
+      if (!store.schemas.has(schemaName)) {
+        if (ifExists) continue;
+        throw new Error(`Schema '${schemaName}' does not exist`);
+      }
+      if (schemaName === "public") {
+        throw new Error("Cannot drop schema 'public'");
+      }
+
+      const tables = store.tablesInSchema(schemaName);
+      if (tables.size > 0 && !cascade) {
+        throw new Error(
+          `Schema '${schemaName}' is not empty, use CASCADE to drop`,
+        );
+      }
+
+      // CASCADE: drop every table through the shared cleanup path
+      // so indexes, GIN, BTree metadata, FK validators, and sequences
+      // are all properly removed.
+      // Use qualified names so SchemaAwareTableStore resolves them
+      // correctly regardless of search_path.
+      for (const tableName of tables.keys()) {
+        const qualified = `${schemaName}.${tableName}`;
+        this._dropTableByName(qualified);
+      }
+
+      store.dropSchema(schemaName, true, false);
     }
     return null;
   }
@@ -9867,7 +10024,7 @@ export class SQLCompiler {
       if (parent) {
         const childTableName = tableName;
         const childTable = table;
-        parent.fkDeleteValidators.push((docId: number) => {
+        const deleteValidator = ((docId: number) => {
           const parentDoc = parent.documentStore.get(docId);
           if (!parentDoc) return;
           const parentVal = parentDoc[parentCol];
@@ -9879,11 +10036,15 @@ export class SQLCompiler {
                 `is still referenced from "${childTableName}"`,
             );
           }
-        });
+        }) as ((docId: number) => void) & { _childTable?: string };
+        deleteValidator._childTable = childTableName;
+        parent.fkDeleteValidators.push(deleteValidator);
 
         // Update validator on parent: PK changes must not orphan child rows
-        parent.fkUpdateValidators.push(
-          (oldDoc: Record<string, unknown>, newDoc: Record<string, unknown>) => {
+        const updateValidator = ((
+          oldDoc: Record<string, unknown>,
+          newDoc: Record<string, unknown>,
+        ) => {
             const oldVal = oldDoc[parentCol];
             const newVal = newDoc[parentCol];
             // If the referenced column value did not change, no violation
@@ -9896,8 +10057,9 @@ export class SQLCompiler {
                   `is still referenced from "${childTableName}"`,
               );
             }
-          },
-        );
+          }) as ((oldDoc: Record<string, unknown>, newDoc: Record<string, unknown>) => void) & { _childTable?: string };
+        updateValidator._childTable = childTableName;
+        parent.fkUpdateValidators.push(updateValidator);
       }
     }
   }

@@ -881,3 +881,142 @@ describe("SchemaSupport", () => {
     expect(result!.rows.some((r) => r["table_schema"] === "myschema")).toBe(true);
   });
 });
+
+// ==================================================================
+// DROP TABLE cascading cleanup
+// ==================================================================
+
+describe("DropTableCascadeCleanup", () => {
+  it("drop table cleans btree indexes in memory", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER, val TEXT)");
+    await engine.sql("CREATE INDEX idx_val ON t (val)");
+    expect(engine._btreeIndexes.has("idx_val")).toBe(true);
+    await engine.sql("DROP TABLE t");
+    expect(engine._btreeIndexes.has("idx_val")).toBe(false);
+  });
+
+  it("drop table cleans gin indexes", async () => {
+    await engine.sql("CREATE TABLE docs (id SERIAL PRIMARY KEY, body TEXT)");
+    await engine.sql("INSERT INTO docs (body) VALUES ('hello world')");
+    await engine.sql("CREATE INDEX idx_body ON docs USING gin (body)");
+    await engine.sql("DROP TABLE docs");
+    // GIN index metadata should be removed
+    const result = await engine.sql(
+      "SELECT * FROM information_schema.tables WHERE table_name = 'docs'",
+    );
+    expect(result!.rows.length).toBe(0);
+  });
+
+  it("drop table cleans fk validators on parent", async () => {
+    await engine.sql("CREATE TABLE parent (id INTEGER PRIMARY KEY)");
+    await engine.sql("INSERT INTO parent (id) VALUES (1)");
+    await engine.sql(
+      "CREATE TABLE child (id INTEGER PRIMARY KEY, " +
+        "pid INTEGER REFERENCES parent(id))",
+    );
+    const parent = engine._tables.get("parent")!;
+    expect(parent.fkDeleteValidators.length).toBeGreaterThan(0);
+
+    await engine.sql("DROP TABLE child");
+    expect(parent.fkDeleteValidators.length).toBe(0);
+    expect(parent.fkUpdateValidators.length).toBe(0);
+  });
+});
+
+// ==================================================================
+// DROP SCHEMA CASCADE cleanup
+// ==================================================================
+
+describe("DropSchemaCascadeCleanup", () => {
+  it("drop schema cascade cleans btree indexes", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    await engine.sql("CREATE TABLE myschema.t (id INTEGER, val INTEGER)");
+    await engine.sql("INSERT INTO myschema.t (id, val) VALUES (1, 10)");
+    await engine.sql("CREATE INDEX idx_val ON myschema.t (val)");
+    expect(engine._btreeIndexes.has("idx_val")).toBe(true);
+
+    await engine.sql("DROP SCHEMA myschema CASCADE");
+    expect(engine._btreeIndexes.has("idx_val")).toBe(false);
+    expect(engine._tables.schemas.has("myschema")).toBe(false);
+  });
+
+  it("drop schema cascade cleans gin indexes", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    await engine.sql(
+      "CREATE TABLE myschema.docs (id INTEGER PRIMARY KEY, body TEXT)",
+    );
+    await engine.sql("INSERT INTO myschema.docs (id, body) VALUES (1, 'hello')");
+    await engine.sql("CREATE INDEX idx_body ON myschema.docs USING gin (body)");
+
+    await engine.sql("DROP SCHEMA myschema CASCADE");
+    // Verify schema is gone and table no longer exists
+    expect(engine._tables.schemas.has("myschema")).toBe(false);
+    expect(engine._tables.has("myschema.docs")).toBe(false);
+  });
+
+  it("drop schema cascade cleans fk validators", async () => {
+    await engine.sql("CREATE TABLE parent (id INTEGER PRIMARY KEY)");
+    await engine.sql("INSERT INTO parent (id) VALUES (1)");
+    await engine.sql("CREATE SCHEMA child_schema");
+    await engine.sql(
+      "CREATE TABLE child_schema.child (" +
+        "id INTEGER PRIMARY KEY, " +
+        "pid INTEGER REFERENCES parent(id))",
+    );
+    const parent = engine._tables.get("parent")!;
+    expect(parent.fkDeleteValidators.length).toBeGreaterThan(0);
+
+    await engine.sql("DROP SCHEMA child_schema CASCADE");
+    expect(parent.fkDeleteValidators.length).toBe(0);
+    expect(parent.fkUpdateValidators.length).toBe(0);
+  });
+
+  it("drop schema not empty without cascade raises", async () => {
+    await engine.sql("CREATE SCHEMA myschema");
+    await engine.sql("CREATE TABLE myschema.t (id INTEGER)");
+    await expect(engine.sql("DROP SCHEMA myschema")).rejects.toThrow(/not empty/);
+  });
+
+  it("drop schema if exists nonexistent", async () => {
+    // Should not raise
+    await engine.sql("DROP SCHEMA IF EXISTS nonexistent");
+  });
+
+  it("drop schema nonexistent raises", async () => {
+    await expect(engine.sql("DROP SCHEMA nonexistent")).rejects.toThrow(
+      /does not exist/,
+    );
+  });
+});
+
+// ==================================================================
+// CREATE INDEX IF NOT EXISTS
+// ==================================================================
+
+describe("CreateIndexIfNotExists", () => {
+  it("btree in memory if not exists", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER, val TEXT)");
+    await engine.sql("CREATE INDEX idx_val ON t (val)");
+    expect(engine._btreeIndexes.has("idx_val")).toBe(true);
+    // Should not raise
+    await engine.sql("CREATE INDEX IF NOT EXISTS idx_val ON t (val)");
+  });
+
+  it("gin if not exists", async () => {
+    await engine.sql("CREATE TABLE docs (id SERIAL PRIMARY KEY, body TEXT)");
+    await engine.sql("INSERT INTO docs (body) VALUES ('hello world')");
+    await engine.sql("CREATE INDEX idx_body ON docs USING gin (body)");
+    // Should not raise
+    await engine.sql(
+      "CREATE INDEX IF NOT EXISTS idx_body ON docs USING gin (body)",
+    );
+  });
+
+  it("without if not exists raises", async () => {
+    await engine.sql("CREATE TABLE t (id INTEGER, val TEXT)");
+    await engine.sql("CREATE INDEX idx_val ON t (val)");
+    await expect(
+      engine.sql("CREATE INDEX idx_val ON t (val)"),
+    ).rejects.toThrow(/already exists/);
+  });
+});

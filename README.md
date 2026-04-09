@@ -606,7 +606,7 @@ src/
   sql/            SQL compiler (libpg-query WASM), expression evaluator, FTS query parser,
                   table DDL/DML, FDW dispatch
   api/            Fluent QueryBuilder
-tests/            3,015 tests across 112 test files
+tests/            3,027 tests across 112 test files
 ```
 
 ## SQL Reference
@@ -615,7 +615,7 @@ tests/            3,015 tests across 112 test files
 
 | Category | Syntax |
 |----------|--------|
-| DDL | `CREATE TABLE [IF NOT EXISTS]`, `CREATE TEMPORARY TABLE`, `DROP TABLE [IF EXISTS]`, `CREATE TABLE AS SELECT`, `ALTER TABLE` (ADD/DROP/RENAME COLUMN, SET/DROP DEFAULT, SET/DROP NOT NULL, ALTER TYPE USING, ADD CONSTRAINT), `TRUNCATE TABLE`, `CREATE INDEX [USING gin\|btree\|hnsw\|ivf\|rtree] [WITH (analyzer = 'name')]`, `DROP INDEX [IF EXISTS]`, `CREATE SEQUENCE`/`NEXTVAL`/`CURRVAL`/`SETVAL`, `ALTER SEQUENCE`, `CREATE SCHEMA [IF NOT EXISTS]`, `DROP SCHEMA [IF EXISTS] [CASCADE]`, `CREATE SERVER ... FOREIGN DATA WRAPPER duckdb_fdw\|arrow_fdw`, `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)`, `DROP SERVER`, `DROP FOREIGN TABLE` |
+| DDL | `CREATE TABLE [IF NOT EXISTS]`, `CREATE TEMPORARY TABLE`, `DROP TABLE [IF EXISTS]`, `CREATE TABLE AS SELECT`, `ALTER TABLE` (ADD/DROP/RENAME COLUMN, SET/DROP DEFAULT, SET/DROP NOT NULL, ALTER TYPE USING, ADD CONSTRAINT), `TRUNCATE TABLE`, `CREATE INDEX [IF NOT EXISTS] [USING gin\|btree\|hnsw\|ivf\|rtree] [WITH (analyzer = 'name')]`, `DROP INDEX [IF EXISTS]`, `CREATE SEQUENCE`/`NEXTVAL`/`CURRVAL`/`SETVAL`, `ALTER SEQUENCE`, `CREATE SCHEMA [IF NOT EXISTS]`, `DROP SCHEMA [IF EXISTS] [CASCADE]`, `CREATE SERVER ... FOREIGN DATA WRAPPER duckdb_fdw\|arrow_fdw`, `CREATE FOREIGN TABLE ... SERVER ... OPTIONS (...)`, `DROP SERVER`, `DROP FOREIGN TABLE` |
 | Constraints | `PRIMARY KEY`, `NOT NULL`, `DEFAULT` (literal and SQL function defaults: `CURRENT_TIMESTAMP`, `CURRENT_DATE`, etc.), `UNIQUE`, `CHECK`, `FOREIGN KEY` (with insert/update/delete validation), `ALTER TABLE ADD CONSTRAINT` (CHECK, UNIQUE, PRIMARY KEY, FOREIGN KEY) |
 | DML | `INSERT INTO ... VALUES`, `INSERT INTO ... SELECT`, `INSERT ... ON CONFLICT DO NOTHING/UPDATE`, `INSERT ... RETURNING`, `UPDATE ... SET ... WHERE [RETURNING]`, `UPDATE ... FROM` (join), `DELETE FROM ... WHERE [RETURNING]`, `DELETE ... USING` (join) |
 | DQL | `SELECT [DISTINCT] ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY [NULLS FIRST/LAST] ... LIMIT ... OFFSET`, `FETCH FIRST n ROWS ONLY`, standalone `VALUES` |
@@ -989,7 +989,7 @@ npx vitest run tests/test_sql.test.ts
 npm run test:watch
 ```
 
-2,952 tests across 111 test files covering:
+3,027 tests across 112 test files covering:
 
 - Boolean algebra axioms verified with 100 random trials each
 - De Morgan's laws, sorted invariants

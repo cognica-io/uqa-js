@@ -1,5 +1,35 @@
 # History
 
+## 0.4.2 (2026-04-09)
+
+Fix DROP TABLE / DROP SCHEMA CASCADE index cleanup, fix DROP TABLE / DROP INDEX List-node unwrapping, and add CREATE INDEX IF NOT EXISTS. DROP TABLE now removes in-memory BTree index metadata, GIN index metadata, and stale foreign key validators from parent tables. DROP SCHEMA CASCADE now performs full per-table cleanup (IndexManager, GIN, BTree, FK validators, sequences, catalog) instead of only deleting the schema entry. CREATE INDEX IF NOT EXISTS is supported for all index types (BTree, GIN). All 3,027 tests pass across 112 test files.
+
+### Bug Fixes
+
+- **DROP TABLE / DROP INDEX List-node unwrapping** (`sql/compiler.ts`): Fixed `_compileDropTable` and `_compileDropIndex` failing to unwrap the `List` AST node from libpg-query's parsed output. The parser produces `{ List: { items: [{ String: { sval: "name" } }] } }` for DROP TABLE/INDEX objects, but the code used `asList(obj)` which only handles plain arrays. This caused DROP TABLE and DROP INDEX to silently skip all cleanup. Added the same `List` unwrapping logic already used by `_compileDropView`.
+- **DROP TABLE BTree index cleanup** (`sql/compiler.ts`): DROP TABLE now removes orphaned entries from `engine._btreeIndexes` for the dropped table. Previously, in-memory BTree index metadata survived table deletion.
+- **DROP TABLE GIN index cleanup** (`sql/compiler.ts`): DROP TABLE now removes GIN index metadata entries from the compiler's `_indexes` map for the dropped table.
+- **DROP TABLE FK validator cleanup** (`sql/compiler.ts`): When a child table with FOREIGN KEY constraints is dropped, stale delete and update validators are now removed from parent tables. FK validators registered on parent tables are tagged with a `_childTable` property for identification during cleanup.
+- **DROP SCHEMA CASCADE full cleanup** (`sql/compiler.ts`): DROP SCHEMA CASCADE now iterates all tables in the schema and performs the same cleanup as individual DROP TABLE -- IndexManager (physical BTree indexes), GIN indexes, in-memory BTree metadata, FK validators, sequences, and catalog rows. Previously, only the schema entry was deleted, leaving all per-table resources orphaned. Validation (non-empty schema check, public schema protection) is now performed in the compiler rather than delegated to the store.
+
+### Enhancements
+
+- **CREATE INDEX IF NOT EXISTS** (`sql/compiler.ts`): All index types now support the `IF NOT EXISTS` clause. When the named index already exists, the statement is a silent no-op. The existence check inspects IndexManager, GIN index tracking (`_indexes`), and in-memory BTree metadata (`_btreeIndexes`).
+
+### Internal
+
+- **`_dropTableByName` method** (`sql/compiler.ts`): Extracted from `_compileDropTable` as a shared cleanup method. Used by both `_compileDropTable` and `_compileDropSchema` to ensure identical cleanup behavior.
+- **`_indexExists` method** (`sql/compiler.ts`): Checks all index stores (compiler `_indexes`, `IndexManager`, and `_btreeIndexes`) for existence of a named index.
+- **`_removeFkValidatorsForChild` / `_validatorReferencesTable` methods** (`sql/compiler.ts`): Walk all remaining tables and purge FK validators that belong to the dropped child table, identified by the `_childTable` tag.
+
+### Tests
+
+- **Total**: 3,027 tests across 112 test files
+- Added 12 tests in `tests/sql/pg-compat-bugs.test.ts`:
+  - `DropTableCascadeCleanup`: BTree index cleanup, GIN index cleanup, FK validator cleanup on parent
+  - `DropSchemaCascadeCleanup`: BTree/GIN/FK cleanup on CASCADE, non-empty schema error, IF EXISTS, nonexistent schema error
+  - `CreateIndexIfNotExists`: BTree IF NOT EXISTS, GIN IF NOT EXISTS, duplicate index error
+
 ## 0.4.1 (2026-04-09)
 
 Fix named graph vertex and edge persistence. The engine-level graph store was initialized as a pure `MemoryGraphStore` even when backed by SQLite, causing all vertex and edge data added to named graphs to be lost on process exit. Named graph metadata was persisted correctly, creating the illusion that graphs existed while their data was empty. All 3,015 tests pass across 112 test files.
