@@ -1,5 +1,17 @@
 # History
 
+## 0.4.1 (2026-04-09)
+
+Fix named graph vertex and edge persistence. The engine-level graph store was initialized as a pure `MemoryGraphStore` even when backed by SQLite, causing all vertex and edge data added to named graphs to be lost on process exit. Named graph metadata was persisted correctly, creating the illusion that graphs existed while their data was empty. All 3,015 tests pass across 112 test files.
+
+### Bug Fix
+
+- **Named graph store persistence** (`engine.ts`): When `dbPath` is provided, `Engine._graphStore` is now initialized as `SQLiteGraphStore(conn)` instead of `MemoryGraphStore()`. This enables write-through persistence for all named graph mutations (vertices, edges, graph lifecycle). Previously, only per-table graph stores used `SQLiteGraphStore`; the engine-level store for named graphs was always in-memory, losing all vertex and edge data on process termination while the graph name survived -- giving the appearance of an empty graph on restart.
+
+### Tests
+
+- **Total**: 3,015 tests across 112 test files.
+
 ## 0.4.0 (2026-04-08)
 
 Standalone property graph SQL functions and per-field analyzer fix.

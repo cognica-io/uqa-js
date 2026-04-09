@@ -19,6 +19,7 @@ import { Table, createColumnDef } from "./sql/table.js";
 import type { ColumnDef } from "./sql/table.js";
 import { MemoryGraphStore } from "./graph/store.js";
 import type { GraphStore } from "./storage/abc/graph-store.js";
+import { SQLiteGraphStore } from "./storage/sqlite-graph-store.js";
 import { QueryBuilder } from "./api/query-builder.js";
 import { Catalog } from "./storage/catalog.js";
 import { IndexManager } from "./storage/index-manager.js";
@@ -352,6 +353,10 @@ export class Engine {
     this._conn = new ManagedConnection(db, this._dbPath);
     this._catalog = new Catalog(this._conn);
     this._indexManager = new IndexManager(this._conn, this._catalog);
+    // Replace the default MemoryGraphStore with a persistent
+    // SQLiteGraphStore so that named-graph vertices and edges
+    // survive process restarts (write-through to SQLite).
+    this._graphStore = new SQLiteGraphStore(this._conn);
     this._loadFromCatalog();
   }
 
