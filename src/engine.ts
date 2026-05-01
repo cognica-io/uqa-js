@@ -1237,6 +1237,36 @@ export class Engine {
 
   // -- Lifecycle --------------------------------------------------------------
 
+  /**
+   * Persist the current engine state to durable storage without
+   * tearing down any in-memory structures.
+   *
+   * After flush() returns, the on-disk SQLite file (when `dbPath` is
+   * set) reflects every mutation issued so far.  The engine remains
+   * fully usable -- tables, graphs, the SQL compiler, and any active
+   * transaction are untouched.
+   *
+   * No-op when no `dbPath` was supplied at construction.
+   */
+  flush(): void {
+    // 1. Mirror in-memory tables, documents, sequences, named graphs,
+    //    and models into the catalog's SQLite tables.
+    this.saveToCatalog();
+
+    // 2. Checkpoint the catalog's WAL so the main DB file is current.
+    if (this._catalog !== null) {
+      this._catalog.flush();
+    }
+
+    // 3. Serialize the in-memory sql.js database and write it to disk.
+    //    sql.js keeps the whole DB in RAM, so this is the step that
+    //    actually makes mutations durable.
+    if (this._conn !== null && this._dbPath !== null && this._fs !== null) {
+      const data = this._conn.exportDatabase();
+      this._fs.writeFileSync(this._dbPath, data);
+    }
+  }
+
   close(): void {
     // Roll back any active transaction
     if (this._transaction !== null && this._transaction.active) {
@@ -1255,21 +1285,17 @@ export class Engine {
     }
     this._tempTables.clear();
 
-    // Persist state to the catalog before closing
-    this.saveToCatalog();
+    // Persist all state and write the SQLite file to disk.
+    this.flush();
 
-    // Close catalog (flushes WAL)
+    // Release the catalog handle.
     if (this._catalog !== null) {
       this._catalog.close();
       this._catalog = null;
     }
 
-    // Write the SQLite database to disk if a file path was provided
-    if (this._conn !== null && this._dbPath !== null) {
-      if (this._fs !== null) {
-        const data = this._conn.exportDatabase();
-        this._fs.writeFileSync(this._dbPath, data);
-      }
+    // Close the underlying SQLite connection.
+    if (this._conn !== null) {
       this._conn.close();
       this._conn = null;
     }

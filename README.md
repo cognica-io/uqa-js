@@ -95,6 +95,10 @@ const engine = await Engine.create({ dbPath: "research.db" });
 
 // ... use the engine ...
 
+// Persist all state to disk without releasing resources.
+// Useful for long-running engines that need durable checkpoints.
+engine.flush();
+
 // Close flushes all state to disk and releases resources.
 engine.close();
 ```
@@ -763,7 +767,7 @@ Used inside `deep_fusion()` to compose neural network pipelines:
 
 ### Persistence
 
-All data is persisted to SQLite (via sql.js WASM) when an engine is created with `dbPath`. The full lifecycle is: `Engine.create({ dbPath })` opens (or creates) the database file and restores all tables, documents, sequences, named graphs, and trained models. `engine.close()` saves current state and flushes the database to disk.
+All data is persisted to SQLite (via sql.js WASM) when an engine is created with `dbPath`. The full lifecycle is: `Engine.create({ dbPath })` opens (or creates) the database file and restores all tables, documents, sequences, named graphs, and trained models. `engine.flush()` checkpoints current state to disk while keeping the engine fully usable -- ideal for long-running processes that need durable snapshots without tearing down in-memory structures. `engine.close()` performs the same persistence and then releases all resources.
 
 | Store | SQLite Table | Description |
 |-------|-------------|-------------|
@@ -898,6 +902,7 @@ import { Table } from "uqa";
 | `engine.query(options)` | Create a QueryBuilder for fluent queries |
 | `engine.begin()` | Start a transaction (returns `Transaction` or `InMemoryTransaction`) |
 | `engine.getDocument(id, table)` | Retrieve a document by ID |
+| `engine.flush()` | Persist all state to the catalog and write the SQLite database to disk (when `dbPath` is set) without releasing resources; engine remains fully usable |
 | `engine.close()` | Persist all state to the catalog, flush SQLite database to disk (when `dbPath` is set), and release resources |
 
 ### QueryBuilder

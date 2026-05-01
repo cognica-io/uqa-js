@@ -821,13 +821,20 @@ export class Catalog {
 
   // -- Lifecycle --------------------------------------------------------------
 
-  close(): void {
-    // Checkpoint WAL to ensure all committed data is flushed to
-    // the main database file before closing.
+  /**
+   * Checkpoint the WAL so that all committed data is folded back into
+   * the main database file.  Safe to call repeatedly; does not close
+   * the underlying connection.
+   */
+  flush(): void {
     try {
       this._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)");
     } catch {
-      // Ignore errors (in-memory databases do not support WAL).
+      // In-memory databases do not support WAL -- nothing to do.
     }
+  }
+
+  close(): void {
+    this.flush();
   }
 }

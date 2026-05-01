@@ -1,5 +1,23 @@
 # History
 
+## 0.4.3 (2026-05-01)
+
+Add `Engine.flush()` for explicit on-demand persistence without tearing down engine state. Long-running engines can now durably checkpoint mutations to disk while remaining fully usable, instead of having to call `close()` (which clears in-memory tables, graphs, and the active connection). All 3,027 tests pass across 112 test files.
+
+### Features
+
+- **`Engine.flush()`** (`engine.ts`): New lifecycle method that persists the full engine state -- in-memory tables, documents, sequences, named graphs, and trained models -- to the catalog, checkpoints the SQLite WAL, and writes the serialized sql.js database to `dbPath`. After flush, the engine remains fully usable; tables, indexes, the SQL compiler, and any active transaction are untouched. No-op when no `dbPath` was supplied at construction.
+- **`Catalog.flush()`** (`storage/catalog.ts`): New method that runs `PRAGMA wal_checkpoint(TRUNCATE)` to fold WAL contents back into the main database file without closing the connection.
+
+### Internal
+
+- **`Catalog.close()` delegates to `flush()`** (`storage/catalog.ts`): The previous `close()` only performed the WAL checkpoint and never actually closed anything; it now explicitly calls `flush()` to make intent clear and consolidate the checkpoint logic in one place.
+- **`Engine.close()` delegates persistence to `flush()`** (`engine.ts`): The persistence sequence (saveToCatalog -> WAL checkpoint -> write SQLite to disk) is now defined once in `flush()`. `close()` invokes it before performing teardown-only steps (release catalog handle, close connection, clear tables and graph store). Future changes to the persistence sequence only need to update `flush()`.
+
+### Tests
+
+- **Total**: 3,027 tests across 112 test files
+
 ## 0.4.2 (2026-04-09)
 
 Fix DROP TABLE / DROP SCHEMA CASCADE index cleanup, fix DROP TABLE / DROP INDEX List-node unwrapping, and add CREATE INDEX IF NOT EXISTS. DROP TABLE now removes in-memory BTree index metadata, GIN index metadata, and stale foreign key validators from parent tables. DROP SCHEMA CASCADE now performs full per-table cleanup (IndexManager, GIN, BTree, FK validators, sequences, catalog) instead of only deleting the schema entry. CREATE INDEX IF NOT EXISTS is supported for all index types (BTree, GIN). All 3,027 tests pass across 112 test files.
