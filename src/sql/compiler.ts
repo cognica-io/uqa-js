@@ -543,6 +543,14 @@ function extractConstValue(node: Record<string, unknown>, params: unknown[]): un
 
   const fval = nodeGet(aConst, "fval");
   if (fval !== null && fval !== undefined) {
+    // libpg-query v17 wraps Float as { fval: { fval: "0.0" } }; older
+    // versions returned the raw "0.0" at A_Const.fval directly.
+    if (typeof fval === "object") {
+      const inner = nodeGet(asObj(fval), "fval");
+      if (inner !== null && inner !== undefined) {
+        return parseFloat(String(inner as string | number));
+      }
+    }
     return parseFloat(String(fval as string | number));
   }
 
@@ -764,6 +772,13 @@ export class SQLCompiler {
 
   get tables(): Map<string, Table> {
     return this._tables;
+  }
+
+  get indexes(): Map<
+    string,
+    { name: string; tableName: string; method: string; columns: string[] }
+  > {
+    return this._indexes;
   }
 
   get views(): Map<string, Record<string, unknown>> {
@@ -1260,27 +1275,36 @@ export class SQLCompiler {
     let numericScale: number | null = null;
     let vectorDimensions: number | null = null;
 
+    // libpg-query v17 returns A_Const.ival as a nested Integer node:
+    //   { A_Const: { ival: { ival: 3 } } }
+    // Older versions returned a bare integer at A_Const.ival.  Unwrap
+    // both shapes so the downstream code sees a plain number.
+    const extractIntmod = (mod: unknown): number | null => {
+      const modObj = asObj(mod);
+      const direct = nodeGet(modObj, "Integer") ?? nodeGet(modObj, "A_Const");
+      if (direct === null || direct === undefined) return null;
+      const ival = nodeGet(asObj(direct), "ival");
+      if (typeof ival === "number") return ival;
+      if (ival !== null && typeof ival === "object") {
+        const inner = nodeGet(asObj(ival), "ival");
+        if (typeof inner === "number") return inner;
+      }
+      return null;
+    };
+
     if (typmods.length > 0) {
-      const firstMod =
-        nodeGet(typmods[0]!, "Integer") ?? nodeGet(typmods[0]!, "A_Const");
-      if (firstMod !== null && firstMod !== undefined) {
-        const val = nodeGet(asObj(firstMod), "ival");
-        if (val !== null && typeof val === "number") {
-          if (resolvedType === "vector") {
-            vectorDimensions = val;
-          } else {
-            numericPrecision = val;
-          }
+      const first = extractIntmod(typmods[0]!);
+      if (first !== null) {
+        if (resolvedType === "vector") {
+          vectorDimensions = first;
+        } else {
+          numericPrecision = first;
         }
       }
       if (typmods.length > 1) {
-        const secondMod =
-          nodeGet(typmods[1]!, "Integer") ?? nodeGet(typmods[1]!, "A_Const");
-        if (secondMod !== null && secondMod !== undefined) {
-          const val = nodeGet(asObj(secondMod), "ival");
-          if (val !== null && typeof val === "number") {
-            numericScale = val;
-          }
+        const second = extractIntmod(typmods[1]!);
+        if (second !== null) {
+          numericScale = second;
         }
       }
     }
@@ -1575,10 +1599,15 @@ export class SQLCompiler {
       if (!idxName) continue;
 
       // Check in-memory BTREE index
-      const eng = this._engine as { _btreeIndexes?: Map<string, [string, string[]]> } | null;
+      const eng = this._engine as {
+        _btreeIndexes?: Map<string, [string, string[]]>;
+        _catalog?: { dropIndex: (name: string) => void } | null;
+      } | null;
+      const catalog = eng?._catalog ?? null;
       if (eng && eng._btreeIndexes && eng._btreeIndexes.has(idxName)) {
         eng._btreeIndexes.delete(idxName);
         this._indexes.delete(idxName);
+        if (catalog !== null) catalog.dropIndex(idxName);
         continue;
       }
 
@@ -1603,6 +1632,7 @@ export class SQLCompiler {
       }
 
       this._indexes.delete(idxName);
+      if (catalog !== null) catalog.dropIndex(idxName);
     }
     return null;
   }
@@ -1875,6 +1905,34 @@ export class SQLCompiler {
     }
 
     this._indexes.set(idxName, { name: idxName, tableName, method, columns });
+
+    // Persist the index registration so it can be restored on restart.
+    // GIN indexes drive the FTS reindex on _loadFromCatalog; btree
+    // entries inform the optimizer.  Skip temp tables (they are
+    // session-scoped and excluded from saveToCatalog).
+    const engForCatalog = this._engine as {
+      _catalog?: {
+        saveIndex: (def: {
+          name: string;
+          indexType: string;
+          tableName: string;
+          columns: string[];
+          parameters: Record<string, unknown>;
+        }) => void;
+      } | null;
+      _tempTables?: Set<string>;
+    } | null;
+    const catalog = engForCatalog?._catalog ?? null;
+    const isTemp = engForCatalog?._tempTables?.has(tableName) ?? false;
+    if (catalog !== null && !isTemp) {
+      catalog.saveIndex({
+        name: idxName,
+        indexType: method,
+        tableName,
+        columns,
+        parameters: options,
+      });
+    }
     return null;
   }
 
@@ -2753,12 +2811,7 @@ export class SQLCompiler {
       }
     }
 
-    for (const docId of toDelete) {
-      if (table.ftsFields.size > 0) {
-        table.invertedIndex.removeDocument(docId);
-      }
-      table.documentStore.delete(docId);
-    }
+    this._applyDeletes(table, toDelete);
 
     if (hasReturning) {
       const columns = this._extractReturningColumns(returningList, table);
@@ -2822,12 +2875,7 @@ export class SQLCompiler {
       }
     }
 
-    for (const docId of toDelete) {
-      if (table.ftsFields.size > 0) {
-        table.invertedIndex.removeDocument(docId);
-      }
-      table.documentStore.delete(docId);
-    }
+    this._applyDeletes(table, toDelete);
 
     if (hasReturning) {
       const columns = this._extractReturningColumns(returningList, table);
@@ -2835,6 +2883,38 @@ export class SQLCompiler {
     }
 
     return { columns: ["deleted"], rows: [{ deleted: toDelete.length }] };
+  }
+
+  /**
+   * Apply a batch of row deletions to the in-memory table state and
+   * mirror them to the catalog so the rows do not resurrect from the
+   * SQLite snapshot on the next engine restart.
+   *
+   * Catalog write-through is skipped for temp tables, matching the
+   * exclusion already used by `Engine.saveToCatalog()`.
+   */
+  private _applyDeletes(table: Table, toDelete: number[]): void {
+    if (toDelete.length === 0) return;
+
+    const eng = this._engine as {
+      _catalog?: {
+        deleteDocument: (table: string, docId: number) => void;
+      } | null;
+      _tempTables?: Set<string>;
+    } | null;
+    const catalog = eng?._catalog ?? null;
+    const isTemp = eng?._tempTables?.has(table.name) ?? false;
+    const persist = catalog !== null && !isTemp;
+
+    for (const docId of toDelete) {
+      if (table.ftsFields.size > 0) {
+        table.invertedIndex.removeDocument(docId);
+      }
+      table.documentStore.delete(docId);
+      if (persist) {
+        catalog.deleteDocument(table.name, docId);
+      }
+    }
   }
 
   // ==================================================================

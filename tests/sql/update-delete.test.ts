@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { Engine } from "../../src/engine.js";
 
 // =============================================================================
@@ -832,5 +835,293 @@ describe("DeleteUsing", () => {
     expect(r!.rows.length).toBe(1);
     expect(r!.rows[0]!["customer_id"]).toBe(20);
     expect(r!.rows[0]!["total"]).toBe(200);
+  });
+});
+
+// =============================================================================
+// DELETE -- catalog persistence across engine restart
+// =============================================================================
+//
+// Regression: DELETE used to remove rows only from the in-memory document
+// store. The catalog snapshot rewritten on flush() / close() never deleted
+// the corresponding catalog rows, so deleted documents resurrected on the
+// next init() / _loadFromCatalog().
+
+describe("DeletePersistence", () => {
+  const tmpFiles: string[] = [];
+
+  afterEach(() => {
+    while (tmpFiles.length > 0) {
+      const p = tmpFiles.pop()!;
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        // already gone
+      }
+    }
+  });
+
+  function freshDbPath(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "uqa-delete-persist-"));
+    const file = path.join(dir, "engine.db");
+    tmpFiles.push(file);
+    return file;
+  }
+
+  it("DELETE survives engine close+reopen", async () => {
+    const dbPath = freshDbPath();
+
+    // First session: insert three rows, delete one, close (flushes to disk).
+    const e1 = new Engine({ dbPath });
+    await e1.init();
+    await e1.sql(
+      "CREATE TABLE conversations (" +
+        "id INTEGER PRIMARY KEY, title TEXT NOT NULL)",
+    );
+    await e1.sql(
+      "INSERT INTO conversations (id, title) VALUES " +
+        "(1, 'alpha'), (2, 'beta'), (3, 'gamma')",
+    );
+    const delResult = await e1.sql("DELETE FROM conversations WHERE id = 2");
+    expect(delResult!.rows[0]!["deleted"]).toBe(1);
+    e1.close();
+
+    // Second session: open the same file. Row id=2 must stay deleted.
+    const e2 = new Engine({ dbPath });
+    await e2.init();
+    const r = await e2.sql("SELECT id FROM conversations ORDER BY id");
+    expect(r!.rows.map((row) => row["id"])).toEqual([1, 3]);
+    e2.close();
+  });
+
+  it("DELETE survives explicit flush without close", async () => {
+    const dbPath = freshDbPath();
+
+    const e1 = new Engine({ dbPath });
+    await e1.init();
+    await e1.sql("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)");
+    await e1.sql(
+      "INSERT INTO notes (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+    );
+    await e1.sql("DELETE FROM notes WHERE id IN (1, 3)");
+    e1.flush();
+    e1.close();
+
+    const e2 = new Engine({ dbPath });
+    await e2.init();
+    const r = await e2.sql("SELECT id FROM notes ORDER BY id");
+    expect(r!.rows.map((row) => row["id"])).toEqual([2]);
+    e2.close();
+  });
+
+  it("DELETE FROM ... USING also persists", async () => {
+    const dbPath = freshDbPath();
+
+    const e1 = new Engine({ dbPath });
+    await e1.init();
+    await e1.sql(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER)",
+    );
+    await e1.sql("CREATE TABLE blacklist (customer_id INTEGER PRIMARY KEY)");
+    await e1.sql(
+      "INSERT INTO orders (id, customer_id) VALUES (1, 10), (2, 20), (3, 10)",
+    );
+    await e1.sql("INSERT INTO blacklist (customer_id) VALUES (10)");
+    const r1 = await e1.sql(
+      "DELETE FROM orders USING blacklist " +
+        "WHERE orders.customer_id = blacklist.customer_id",
+    );
+    expect(r1!.rows[0]!["deleted"]).toBe(2);
+    e1.close();
+
+    const e2 = new Engine({ dbPath });
+    await e2.init();
+    const r = await e2.sql("SELECT id, customer_id FROM orders ORDER BY id");
+    expect(r!.rows).toEqual([{ id: 2, customer_id: 20 }]);
+    e2.close();
+  });
+});
+
+// =============================================================================
+// Index rebuild across engine restart
+// =============================================================================
+//
+// Regression: _loadFromCatalog used to restore documents but never rebuild
+// the in-memory inverted index (BM25), vector indexes, or spatial indexes.
+// After a restart, retrieveHybrid (FTS + vector fusion) returned empty
+// results because the indexes were empty even though documents existed.
+
+describe("IndexPersistence", () => {
+  const tmpFiles: string[] = [];
+
+  afterEach(() => {
+    while (tmpFiles.length > 0) {
+      const p = tmpFiles.pop()!;
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        // already gone
+      }
+    }
+  });
+
+  function freshDbPath(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "uqa-index-persist-"));
+    const file = path.join(dir, "engine.db");
+    tmpFiles.push(file);
+    return file;
+  }
+
+  it("BM25/FTS results survive engine close+reopen", async () => {
+    const dbPath = freshDbPath();
+
+    const e1 = new Engine({ dbPath });
+    await e1.init();
+    await e1.sql(
+      "CREATE TABLE papers (id INTEGER PRIMARY KEY, title TEXT NOT NULL)",
+    );
+    await e1.sql(
+      "CREATE INDEX idx_papers_title ON papers USING gin (title)",
+    );
+    await e1.sql(
+      "INSERT INTO papers (id, title) VALUES " +
+        "(1, 'attention is all you need'), " +
+        "(2, 'bert pre-training of transformers'), " +
+        "(3, 'gpt language models')",
+    );
+
+    // Sanity: FTS works pre-restart.
+    const pre = await e1.sql(
+      "SELECT id FROM papers WHERE text_match(title, 'attention') ORDER BY id",
+    );
+    expect(pre!.rows.map((r) => r["id"])).toEqual([1]);
+    e1.close();
+
+    // After restart: FTS must still find the same row.
+    const e2 = new Engine({ dbPath });
+    await e2.init();
+    const post = await e2.sql(
+      "SELECT id FROM papers WHERE text_match(title, 'attention') ORDER BY id",
+    );
+    expect(post!.rows.map((r) => r["id"])).toEqual([1]);
+
+    // A different term must hit the doc that contains it.
+    const post2 = await e2.sql(
+      "SELECT id FROM papers WHERE text_match(title, 'bert') ORDER BY id",
+    );
+    expect(post2!.rows.map((r) => r["id"])).toEqual([2]);
+    e2.close();
+  });
+
+  it("vector knn results survive engine close+reopen", async () => {
+    const dbPath = freshDbPath();
+
+    const e1 = new Engine({ dbPath });
+    await e1.init();
+    await e1.sql(
+      "CREATE TABLE items (" +
+        "id INTEGER PRIMARY KEY, " +
+        "name TEXT, " +
+        "embedding VECTOR(3)" +
+        ")",
+    );
+
+    // engine.addDocument is the in-process write path: it stores the
+    // document and pushes the vector into the column's index.  We use
+    // it here because the SQL INSERT path for ARRAY[...] literals into
+    // VECTOR columns serializes incorrectly (separate, pre-existing
+    // issue); going through the JS API isolates the test to index
+    // persistence rather than ingest plumbing.
+    e1.addDocument(
+      1,
+      { id: 1, name: "a", embedding: [1.0, 0.0, 0.0] },
+      "items",
+      new Float64Array([1.0, 0.0, 0.0]),
+    );
+    e1.addDocument(
+      2,
+      { id: 2, name: "b", embedding: [0.0, 1.0, 0.0] },
+      "items",
+      new Float64Array([0.0, 1.0, 0.0]),
+    );
+    e1.addDocument(
+      3,
+      { id: 3, name: "c", embedding: [0.0, 0.0, 1.0] },
+      "items",
+      new Float64Array([0.0, 0.0, 1.0]),
+    );
+
+    const pre = await e1.sql(
+      "SELECT id FROM items WHERE knn_match(embedding, ARRAY[1.0, 0.0, 0.0], 1) " +
+        "ORDER BY _score DESC",
+    );
+    expect(pre!.rows[0]!["id"]).toBe(1);
+    e1.close();
+
+    // After restart: the vector index must be repopulated from
+    // documents.  Without the fix the index is empty and the result
+    // set is empty.
+    const e2 = new Engine({ dbPath });
+    await e2.init();
+    const post = await e2.sql(
+      "SELECT id FROM items WHERE knn_match(embedding, ARRAY[1.0, 0.0, 0.0], 1) " +
+        "ORDER BY _score DESC",
+    );
+    expect(post!.rows.length).toBeGreaterThan(0);
+    expect(post!.rows[0]!["id"]).toBe(1);
+
+    // Asking for the third basis vector should return doc 3.
+    const post2 = await e2.sql(
+      "SELECT id FROM items WHERE knn_match(embedding, ARRAY[0.0, 0.0, 1.0], 1) " +
+        "ORDER BY _score DESC",
+    );
+    expect(post2!.rows[0]!["id"]).toBe(3);
+    e2.close();
+  });
+
+  it("hybrid FTS + vector survives close+reopen", async () => {
+    const dbPath = freshDbPath();
+
+    const e1 = new Engine({ dbPath });
+    await e1.init();
+    await e1.sql(
+      "CREATE TABLE docs (" +
+        "id INTEGER PRIMARY KEY, " +
+        "body TEXT NOT NULL, " +
+        "embedding VECTOR(2)" +
+        ")",
+    );
+    await e1.sql("CREATE INDEX idx_docs_body ON docs USING gin (body)");
+
+    e1.addDocument(
+      1,
+      { id: 1, body: "hello world", embedding: [1.0, 0.0] },
+      "docs",
+      new Float64Array([1.0, 0.0]),
+    );
+    e1.addDocument(
+      2,
+      { id: 2, body: "goodbye world", embedding: [0.0, 1.0] },
+      "docs",
+      new Float64Array([0.0, 1.0]),
+    );
+    e1.close();
+
+    const e2 = new Engine({ dbPath });
+    await e2.init();
+
+    // FTS half: 'hello' must match doc 1 only.
+    const fts = await e2.sql(
+      "SELECT id FROM docs WHERE text_match(body, 'hello')",
+    );
+    expect(fts!.rows.map((row) => row["id"])).toEqual([1]);
+
+    // Vector half: query [0.0, 1.0] is closest to doc 2.
+    const knn = await e2.sql(
+      "SELECT id FROM docs WHERE knn_match(embedding, ARRAY[0.0, 1.0], 1) " +
+        "ORDER BY _score DESC",
+    );
+    expect(knn!.rows[0]!["id"]).toBe(2);
+    e2.close();
   });
 });

@@ -1168,7 +1168,18 @@ export class Engine {
   private _loadFromCatalog(): void {
     if (this._catalog === null) return;
 
-    // Load table schemas and reconstruct Table objects with their documents
+    // -- 1. Restore custom analyzers BEFORE any reindex so that GIN
+    //       reindexing can resolve named analyzers by name.
+    const analyzerConfigs = this._catalog.loadAnalyzers();
+    for (const [name, config] of analyzerConfigs) {
+      const analyzer = Analyzer.fromDict(config);
+      registerAnalyzer(name, analyzer);
+    }
+
+    // -- 2. Load table schemas and reconstruct Table objects with
+    //       their persisted documents.  Vector and spatial index
+    //       slots are auto-created by the Table constructor from
+    //       column types; their data is repopulated below.
     const schemas = this._catalog.loadTableSchemas();
     for (const [name, colDicts] of schemas) {
       const columns: ColumnDef[] = colDicts.map((cd) =>
@@ -1186,7 +1197,6 @@ export class Engine {
       );
       const table = new Table(name, columns);
 
-      // Load persisted documents into the table
       const docs = this._catalog.loadDocuments(name);
       for (const [docId, data] of docs) {
         table.documentStore.put(docId, data);
@@ -1196,16 +1206,75 @@ export class Engine {
       }
 
       this._tables.set(name, table);
-      // Register in the compiler so SQL queries can find the table
       this._compiler.tables.set(name, table);
     }
 
-    // Load sequences from metadata
+    // -- 3. Restore index registrations.  GIN entries seed the
+    //       table's `ftsFields`; btree entries inform the optimizer.
+    //       The compiler's `_indexes` map is repopulated so that
+    //       DROP INDEX continues to work after restart.
+    const indexRows = this._catalog.loadIndexes();
+    for (const [idxName, indexType, tableName, columns, parameters] of indexRows) {
+      const table = this._tables.get(tableName);
+      if (table === undefined) continue;
+
+      if (indexType === "gin") {
+        for (const col of columns) {
+          if (table.columns.has(col)) {
+            table.ftsFields.add(col);
+          }
+        }
+        const analyzerName = parameters["analyzer"] as string | undefined;
+        if (analyzerName) {
+          const analyzer = getAnalyzer(analyzerName);
+          for (const col of columns) {
+            table.invertedIndex.setFieldAnalyzer(col, analyzer, "both");
+          }
+        }
+      }
+
+      if (indexType === "btree") {
+        this._btreeIndexes.set(idxName, [tableName, columns]);
+      }
+
+      this._compiler.indexes.set(idxName, {
+        name: idxName,
+        tableName,
+        method: indexType,
+        columns,
+      });
+    }
+
+    // -- 4. Restore per-field analyzer assignments (CREATE ANALYZER
+    //       + SET TABLE ... ANALYZER).  Must run before reindex so
+    //       that postings are produced with the correct tokenizer.
+    const fieldAnalyzers = this._catalog.loadTableFieldAnalyzers();
+    for (const [tableName, field, phase, analyzerName] of fieldAnalyzers) {
+      const table = this._tables.get(tableName);
+      if (table === undefined) continue;
+      const analyzer = getAnalyzer(analyzerName);
+      table.invertedIndex.setFieldAnalyzer(
+        field,
+        analyzer,
+        phase as "index" | "search" | "both",
+      );
+    }
+
+    // -- 5. Rebuild in-memory indexes from documents.  The inverted
+    //       index, vector indexes, and spatial indexes are not
+    //       persisted directly -- their content lives inside each
+    //       document.  Walking the document store and re-feeding it
+    //       reconstructs them deterministically.
+    for (const table of this._tables.values()) {
+      this._rebuildIndexesFromDocuments(table);
+    }
+
+    // -- 6. Sequences, named graphs, and models.
     const allMeta = this._catalog.conn.query(
       `SELECT key, value FROM _metadata WHERE key LIKE 'seq:%'`,
     );
     for (const row of allMeta) {
-      const seqName = (row["key"] as string).substring(4); // strip "seq:"
+      const seqName = (row["key"] as string).substring(4);
       const seqData = JSON.parse(row["value"] as string) as Record<
         string,
         number
@@ -1213,7 +1282,6 @@ export class Engine {
       this._sequences.set(seqName, seqData);
     }
 
-    // Load named graphs
     const graphNames = this._catalog.loadNamedGraphs();
     for (const name of graphNames) {
       if (!this._graphStore.hasGraph(name)) {
@@ -1221,7 +1289,6 @@ export class Engine {
       }
     }
 
-    // Load models
     const modelRows = this._catalog.conn.query(
       `SELECT model_name, config_json FROM _models`,
     );
@@ -1232,6 +1299,62 @@ export class Engine {
         unknown
       >;
       this._models.set(modelName, config);
+    }
+  }
+
+  /**
+   * Walk a table's document store and re-feed every document into
+   * its in-memory inverted/vector/spatial indexes.  The indexes
+   * themselves (instances) must already exist on the table -- this
+   * method only rebuilds their contents, not their registrations.
+   *
+   * Used during _loadFromCatalog to repopulate transient indexes
+   * after the schema and documents have been restored.
+   */
+  private _rebuildIndexesFromDocuments(table: Table): void {
+    const hasFts = table.ftsFields.size > 0;
+    const vectorCols = [...table.vectorIndexes.keys()];
+    const spatialCols = [...table.spatialIndexes.keys()];
+    if (!hasFts && vectorCols.length === 0 && spatialCols.length === 0) {
+      return;
+    }
+
+    for (const [docId, doc] of table.documentStore.iterAll()) {
+      if (hasFts) {
+        const textFields: Record<string, string> = {};
+        for (const field of table.ftsFields) {
+          const v = doc[field];
+          if (typeof v === "string") textFields[field] = v;
+        }
+        if (Object.keys(textFields).length > 0) {
+          table.invertedIndex.addDocument(docId, textFields);
+        }
+      }
+
+      for (const col of vectorCols) {
+        const v = doc[col];
+        if (v === null || v === undefined) continue;
+        const idx = table.vectorIndexes.get(col)!;
+        if (v instanceof Float64Array) {
+          idx.add(docId, v);
+        } else if (Array.isArray(v)) {
+          idx.add(docId, new Float64Array(v as number[]));
+        }
+      }
+
+      for (const col of spatialCols) {
+        const v = doc[col];
+        if (v === null || v === undefined) continue;
+        const idx = table.spatialIndexes.get(col)!;
+        // Spatial indexes accept point-like values; let the index
+        // decide how to interpret coordinates.
+        const point = v as { x: number; y: number } | [number, number];
+        const x = Array.isArray(point) ? point[0] : point.x;
+        const y = Array.isArray(point) ? point[1] : point.y;
+        if (typeof x === "number" && typeof y === "number") {
+          idx.add(docId, x, y);
+        }
+      }
     }
   }
 
@@ -1288,6 +1411,14 @@ export class Engine {
     // Persist all state and write the SQLite file to disk.
     this.flush();
 
+    // Release in-memory state.  Must run before the connection is
+    // closed because SQLiteGraphStore.clear() issues DELETE statements
+    // against the live SQLite handle.  The on-disk file has already
+    // been written by flush(), so these in-memory mutations do not
+    // affect persistence.
+    this._tables.clear();
+    this._graphStore.clear();
+
     // Release the catalog handle.
     if (this._catalog !== null) {
       this._catalog.close();
@@ -1299,8 +1430,5 @@ export class Engine {
       this._conn.close();
       this._conn = null;
     }
-
-    this._tables.clear();
-    this._graphStore.clear();
   }
 }

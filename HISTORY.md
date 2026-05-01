@@ -1,5 +1,29 @@
 # History
 
+## 0.4.4 (2026-05-01)
+
+Fix four interlocking persistence bugs that left BM25 / vector search returning empty results after engine restart. Documents survived restart, but every in-memory index (inverted index, vector index, spatial index) was empty because it was never repopulated and `CREATE INDEX` registrations were never persisted. Also fixes write-through DELETE persistence, a `close()` ordering bug introduced in 0.4.1, and libpg-query v17 nested-Integer / nested-Float extraction. All 3,033 tests pass across 112 test files.
+
+### Bug Fixes
+
+- **DELETE catalog write-through** (`sql/compiler.ts`): `_compileDelete` and `_compileDeleteUsing` previously removed rows only from `documentStore` and the inverted index. The catalog snapshot rewritten on `flush()` / `close()` does `INSERT OR REPLACE` for every doc currently in memory but never deletes catalog rows that have disappeared, so deleted documents resurrected on the next `init()` / `_loadFromCatalog()`. Both delete paths now call `catalog.deleteDocument(table, docId)` for each removed row (skipped for temp tables, matching `saveToCatalog`'s exclusion). Extracted into a shared `_applyDeletes(table, toDelete)` helper.
+- **`Engine.close()` ordering with SQLite-backed graph store** (`engine.ts`): `close()` was calling `this._graphStore.clear()` after `this._conn.close()`. With v0.4.1's `MemoryGraphStore` -> `SQLiteGraphStore` swap (for named-graph persistence), `clear()` issues `DELETE` statements against the now-closed connection and sql.js throws the bare string `"Database closed"`. The teardown order is now: `flush()` -> `_tables.clear()` + `_graphStore.clear()` (against the live connection; the on-disk file has already been written by `flush()`) -> catalog close -> connection close.
+- **Index rebuild on `_loadFromCatalog`** (`engine.ts`): The inverted index, vector indexes, and spatial indexes are not persisted directly -- their content lives inside each document. After restoring documents, `_loadFromCatalog` now walks every restored document and re-feeds it into the (already-allocated) indexes via the new `_rebuildIndexesFromDocuments(table)` helper. Without this, `text_match` / `knn_match` / `spatial_within` returned empty results post-restart.
+- **GIN index registration persistence** (`sql/compiler.ts`): `_compileIndexStmt` now persists GIN and btree index registrations to `_catalog_indexes` via `catalog.saveIndex()` (skipped for temp tables). `_compileDropIndex` mirrors the drop via `catalog.dropIndex()`. Without this, even a correct rebuild had no way to know which fields were FTS-indexed -- the catalog table existed but had zero callers (it was tagged "Phase 11" pending in `index-manager.ts`).
+- **libpg-query v17 nested Integer / Float extraction** (`sql/compiler.ts`): libpg-query v17 wraps `A_Const.ival` as `{ ival: 3 }` and `A_Const.fval` as `{ fval: "0.0" }` (Integer / Float wrapper nodes). The previous extraction expected the bare value, which made `VECTOR(3)` parse with `vectorDimensions = null` (so `Table` refused to allocate the vector index) and made every numeric literal in `ARRAY[...]` resolve to `NaN`. Both extraction paths now unwrap one level deeper while still accepting the older flat shape: extracted helper `extractIntmod()` in `_compileTypeName`, plus a parallel `fval` unwrap in `extractConstValue`.
+
+### Internal
+
+- **`Catalog.flush()` and `Catalog.close()` cleanup** (continued from 0.4.3): `Catalog.close()` already delegates to `flush()`; the lifecycle is single-source-of-truth.
+- **Index registration restore** (`engine.ts`): `_loadFromCatalog` now restores custom analyzers (`loadAnalyzers`), index registrations (`loadIndexes` -> `ftsFields` for GIN, `_btreeIndexes` for btree, compiler `_indexes` map for both), per-field analyzer assignments (`loadTableFieldAnalyzers`), then rebuilds in-memory indexes from documents.
+- **`SQLCompiler.indexes` getter** (`sql/compiler.ts`): Exposes the previously-private `_indexes` map so the engine can repopulate it on load. Symmetric to the existing `tables` getter.
+
+### Tests
+
+- **Total**: 3,033 tests across 112 test files (+6 from 0.4.3)
+- Added `DeletePersistence` describe block (`tests/sql/update-delete.test.ts`): 3 tests covering close+reopen, explicit `flush()` survives close, and `DELETE FROM ... USING` persistence on a real `dbPath` engine.
+- Added `IndexPersistence` describe block (`tests/sql/update-delete.test.ts`): 3 tests covering BM25/FTS round-trips, vector KNN round-trips, and hybrid FTS + vector round-trips. Vector tests use `engine.addDocument` with explicit `Float64Array` to isolate the test from the unrelated SQL `INSERT ... ARRAY[...]` ingest path.
+
 ## 0.4.3 (2026-05-01)
 
 Add `Engine.flush()` for explicit on-demand persistence without tearing down engine state. Long-running engines can now durably checkpoint mutations to disk while remaining fully usable, instead of having to call `close()` (which clears in-memory tables, graphs, and the active connection). All 3,027 tests pass across 112 test files.
